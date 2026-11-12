@@ -2088,6 +2088,95 @@ class LzmaBadCrcTests(AbstractBadCrcTests, unittest.TestCase):
         b'\x00>\x00\x00\x00\x00\x00')
 
 
+class StrictEndOfCentralDirectoryTests(unittest.TestCase):
+    """Verify strict selection of the end-of-central-directory record.
+
+    Every EOCD signature near the end of the file is a candidate; a
+    candidate is only used if its comment length, central directory
+    range, entry counts and ZIP64 records are mutually consistent, and
+    several valid candidates with different member sets are ambiguous.
+    """
+
+    def make_zip(self, members, comment=b""):
+        bio = io.BytesIO()
+        with zipfile.ZipFile(bio, "w", zipfile.ZIP_STORED) as zipfp:
+            for name, data in members:
+                zipfp.writestr(name, data)
+            zipfp.comment = comment
+        return bio.getvalue()
+
+    def test_comment_containing_eocd_signature(self):
+        # A comment that merely contains the EOCD signature bytes is not
+        # a record: the real members are listed.
+        comment = b"a PK\x05\x06 signature inside a normal long comment"
+        data = self.make_zip([("real.txt", b"real data")], comment)
+        with zipfile.ZipFile(io.BytesIO(data)) as zipfp:
+            self.assertEqual(zipfp.namelist(), ["real.txt"])
+            self.assertEqual(zipfp.comment, comment)
+            self.assertEqual(zipfp.read("real.txt"), b"real data")
+
+    def test_sfx_prefix_and_comment_still_work(self):
+        comment = b"archive comment"
+        data = b"SFXSTUB" * 10 + self.make_zip(
+            [("real.txt", b"real data")], comment)
+        with zipfile.ZipFile(io.BytesIO(data)) as zipfp:
+            self.assertEqual(zipfp.namelist(), ["real.txt"])
+            self.assertEqual(zipfp.comment, comment)
+            self.assertEqual(zipfp.read("real.txt"), b"real data")
+
+    def test_fake_empty_directory_appended(self):
+        # A fake empty EOCD appended after a commented archive must not
+        # make the archive look empty: the file is ambiguous and is
+        # rejected, reporting both candidates.
+        data = self.make_zip([("real.txt", b"real data")],
+                             b"the real comment")
+        real_eocd = data.rfind(b"PK\x05\x06")
+        data += b"PK\x05\x06" + b"\x00" * 18
+        fake_eocd = len(data) - 22
+        with self.assertRaises(zipfile.BadZipFile) as cm:
+            zipfile.ZipFile(io.BytesIO(data))
+        msg = str(cm.exception)
+        self.assertIn("offset %d" % real_eocd, msg)
+        self.assertIn("offset %d" % fake_eocd, msg)
+        self.assertIn("with 0 entries", msg)
+        self.assertIn("with 1 entries", msg)
+
+    def test_two_valid_end_records_are_ambiguous(self):
+        # An archive whose comment is itself a complete archive has two
+        # structurally valid end records claiming different directories.
+        inner = self.make_zip([("inner.txt", b"inner data")])
+        outer = self.make_zip([("outer.txt", b"outer data")], inner)
+        outer_eocd = outer.find(b"PK\x05\x06")
+        inner_eocd = outer.rfind(b"PK\x05\x06")
+        self.assertNotEqual(outer_eocd, inner_eocd)
+        with self.assertRaises(zipfile.BadZipFile) as cm:
+            zipfile.ZipFile(io.BytesIO(outer))
+        msg = str(cm.exception)
+        self.assertIn("offset %d" % outer_eocd, msg)
+        self.assertIn("offset %d" % inner_eocd, msg)
+        # both claimed central directory ranges are reported
+        self.assertEqual(msg.count("claims central directory"), 2)
+        self.assertFalse(zipfile.is_zipfile(io.BytesIO(outer)))
+
+    def test_identical_member_sets_are_not_ambiguous(self):
+        # Two valid end records describing the same members (a duplicated
+        # central directory) do not disagree, so the archive is readable.
+        data = self.make_zip([("real.txt", b"real data")])
+        eocd_pos = data.rfind(b"PK\x05\x06")
+        endrec = struct.unpack(zipfile.structEndArchive,
+                               data[eocd_pos:eocd_pos + 22])
+        cd_offset, cd_size = endrec[6], endrec[5]
+        cd = data[cd_offset:cd_offset + cd_size]
+        # second copy of the central directory followed by its own EOCD
+        new_eocd = struct.pack(
+            zipfile.structEndArchive, zipfile.stringEndArchive,
+            0, 0, 1, 1, cd_size, eocd_pos + 22, 0)
+        data = data + cd + new_eocd
+        with zipfile.ZipFile(io.BytesIO(data)) as zipfp:
+            self.assertEqual(zipfp.namelist(), ["real.txt"])
+            self.assertEqual(zipfp.read("real.txt"), b"real data")
+
+
 class DecryptionTests(unittest.TestCase):
     """Check that ZIP decryption works. Since the library does not
     support encryption at the moment, we use a pre-generated encrypted

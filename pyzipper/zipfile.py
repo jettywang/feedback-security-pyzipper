@@ -217,7 +217,7 @@ def _check_zipfile(fp):
     try:
         if _EndRecData(fp):
             return True         # file has correct magic number
-    except OSError:
+    except (OSError, BadZipFile):
         pass
     return False
 
@@ -244,15 +244,17 @@ def is_zipfile(filename):
 
 def _EndRecData64(fpin, offset, endrec):
     """
-    Read the ZIP64 end-of-archive records and use that to update endrec
-    """
-    try:
-        fpin.seek(offset - sizeEndCentDir64Locator, 2)
-    except OSError:
-        # If the seek fails, the file is not large enough to contain a ZIP64
-        # end-of-archive record, so just return the end record we were given.
-        return endrec
+    Read the ZIP64 end-of-archive records and use that to update endrec.
 
+    ``offset`` is the absolute file position of the "end of central
+    directory" record.  Returns the updated endrec, or None if a ZIP64
+    locator is present but the ZIP64 records are missing or inconsistent
+    (in which case the candidate end record must be rejected).
+    """
+    if offset < sizeEndCentDir64Locator:
+        # No room for a ZIP64 locator before the end record.
+        return endrec
+    fpin.seek(offset - sizeEndCentDir64Locator)
     data = fpin.read(sizeEndCentDir64Locator)
     if len(data) != sizeEndCentDir64Locator:
         return endrec
@@ -263,16 +265,22 @@ def _EndRecData64(fpin, offset, endrec):
     if diskno != 0 or disks != 1:
         raise BadZipFile("zipfiles that span multiple disks are not supported")
 
+    # A ZIP64 locator is present, so the corresponding ZIP64 record must
+    # exist immediately before it for this candidate to be consistent.
     # Assume no 'zip64 extensible data'
-    fpin.seek(offset - sizeEndCentDir64Locator - sizeEndCentDir64, 2)
+    if offset < sizeEndCentDir64Locator + sizeEndCentDir64:
+        return None
+    fpin.seek(offset - sizeEndCentDir64Locator - sizeEndCentDir64)
     data = fpin.read(sizeEndCentDir64)
     if len(data) != sizeEndCentDir64:
-        return endrec
+        return None
     sig, sz, create_version, read_version, disk_num, disk_dir, \
         dircount, dircount2, dirsize, diroffset = \
         struct.unpack(structEndArchive64, data)
     if sig != stringEndArchive64:
-        return endrec
+        return None
+    if disk_num != 0 or disk_dir != 0 or dircount != dircount2:
+        return None
 
     # Update the original endrec using data from the ZIP64 record
     endrec[_ECD_SIGNATURE] = sig
@@ -285,65 +293,161 @@ def _EndRecData64(fpin, offset, endrec):
     return endrec
 
 
+def _read_central_directory(fpin, start, size, concat):
+    """Walk the central directory and return a description of its members.
+
+    Returns a list of (filename, header_offset, CRC, compressed size,
+    uncompressed size) tuples with absolute header offsets, or None if
+    the central directory is structurally inconsistent.
+    """
+    if size == 0:
+        return []
+    fpin.seek(start)
+    data = fpin.read(size)
+    if len(data) != size:
+        return None
+    fp = io.BytesIO(data)
+    members = []
+    total = 0
+    while total < size:
+        centdir = fp.read(sizeCentralDir)
+        if len(centdir) != sizeCentralDir:
+            return None
+        centdir = struct.unpack(structCentralDir, centdir)
+        if centdir[_CD_SIGNATURE] != stringCentralDir:
+            return None
+        filename = fp.read(centdir[_CD_FILENAME_LENGTH])
+        if len(filename) != centdir[_CD_FILENAME_LENGTH]:
+            return None
+        fp.seek(centdir[_CD_EXTRA_FIELD_LENGTH]
+                + centdir[_CD_COMMENT_LENGTH], 1)
+        members.append((filename,
+                        centdir[_CD_LOCAL_HEADER_OFFSET] + concat,
+                        centdir[_CD_CRC],
+                        centdir[_CD_COMPRESSED_SIZE],
+                        centdir[_CD_UNCOMPRESSED_SIZE]))
+        total = (total + sizeCentralDir + centdir[_CD_FILENAME_LENGTH]
+                 + centdir[_CD_EXTRA_FIELD_LENGTH]
+                 + centdir[_CD_COMMENT_LENGTH])
+    if total != size:
+        return None
+    return members
+
+
+def _EndRecCandidate(fpin, data, start, window_start, filesize):
+    """Validate one possible "End of Central Directory" record.
+
+    ``start`` is the offset of the candidate signature within ``data`` and
+    ``window_start`` is the absolute file offset of ``data``.  Returns a
+    (endrec, members) tuple if the candidate is fully consistent with the
+    rest of the file, or None if it is not.
+    """
+    recData = data[start:start + sizeEndCentDir]
+    if len(recData) != sizeEndCentDir:
+        # Truncated record: not a usable candidate.
+        return None
+    endrec = list(struct.unpack(structEndArchive, recData))
+    pos = window_start + start
+    commentSize = endrec[_ECD_COMMENT_SIZE]  # as claimed by the zip file
+    if pos + sizeEndCentDir + commentSize > filesize:
+        # The claimed comment extends beyond the end of the file.
+        return None
+    comment = data[start + sizeEndCentDir:
+                   start + sizeEndCentDir + commentSize]
+    if endrec[_ECD_DISK_NUMBER] != 0 or endrec[_ECD_DISK_START] != 0:
+        raise BadZipFile("zipfiles that span multiple disks are not supported")
+    if endrec[_ECD_ENTRIES_THIS_DISK] != endrec[_ECD_ENTRIES_TOTAL]:
+        return None
+    endrec.append(comment)
+    endrec.append(pos)
+
+    # Incorporate the ZIP64 records, requiring them to be consistent
+    endrec = _EndRecData64(fpin, pos, endrec)
+    if endrec is None:
+        return None
+
+    # The central directory must fit entirely before this end record
+    # (and before the ZIP64 records, when present).  "concat" is the
+    # shift between the archive's offset origin and the file's; it is
+    # positive for archives with a prefix (e.g. a self-extracting stub)
+    # and negative for archives extracted from a larger file, but the
+    # directory itself must start at a non-negative file position.
+    dir_end = pos
+    if endrec[_ECD_SIGNATURE] == stringEndArchive64:
+        dir_end -= sizeEndCentDir64 + sizeEndCentDir64Locator
+    concat = dir_end - endrec[_ECD_SIZE] - endrec[_ECD_OFFSET]
+    if endrec[_ECD_OFFSET] + concat < 0:
+        return None
+    if endrec[_ECD_ENTRIES_TOTAL] == 0 and endrec[_ECD_SIZE] != 0:
+        return None
+    members = _read_central_directory(
+        fpin, endrec[_ECD_OFFSET] + concat, endrec[_ECD_SIZE], concat)
+    if members is None or len(members) != endrec[_ECD_ENTRIES_TOTAL]:
+        return None
+    return endrec, members
+
+
 def _EndRecData(fpin):
     """Return data from the "End of Central Directory" record, or None.
 
     The data is a list of the nine items in the ZIP "End of central dir"
-    record followed by a tenth item, the file seek offset of this record."""
+    record followed by a tenth item, the file seek offset of this record.
+
+    Every occurrence of the end-of-central-directory signature near the
+    end of the file is considered.  A candidate is only accepted if its
+    comment length, central directory range, entry counts and ZIP64
+    records are all mutually consistent.  If several structurally valid
+    candidates disagree about the archive members, the file is rejected
+    as ambiguous instead of silently picking one of them.
+    """
 
     # Determine file size
     fpin.seek(0, 2)
     filesize = fpin.tell()
 
-    # Check to see if this is ZIP file with no archive comment (the
-    # "end of central directory" structure should be the last item in the
-    # file if this is the case).
-    try:
-        fpin.seek(-sizeEndCentDir, 2)
-    except OSError:
-        return None
-    data = fpin.read()
-    if (len(data) == sizeEndCentDir and
-            data[0:4] == stringEndArchive and
-            data[-2:] == b"\000\000"):
-        # the signature is correct and there's no comment, unpack structure
-        endrec = struct.unpack(structEndArchive, data)
-        endrec = list(endrec)
-
-        # Append a blank comment and record start offset
-        endrec.append(b"")
-        endrec.append(filesize - sizeEndCentDir)
-
-        # Try to read the "Zip64 end of central directory" structure
-        return _EndRecData64(fpin, -sizeEndCentDir, endrec)
-
-    # Either this is not a ZIP file, or it is a ZIP file with an archive
-    # comment.  Search the end of the file for the "end of central directory"
-    # record signature. The comment is the last item in the ZIP file and may be
-    # up to 64K long.  It is assumed that the "end of central directory" magic
-    # number does not appear in the comment.
+    # The comment is the last item in the ZIP file and may be up to 64K
+    # long.  Search the end of the file for every occurrence of the "end
+    # of central directory" record signature; it may appear in a comment
+    # or in appended trailing data, so each occurrence must be validated.
     maxCommentStart = max(filesize - (1 << 16) - sizeEndCentDir, 0)
     fpin.seek(maxCommentStart, 0)
     data = fpin.read()
-    start = data.rfind(stringEndArchive)
-    if start >= 0:
-        # found the magic number; attempt to unpack and interpret
-        recData = data[start:start+sizeEndCentDir]
-        if len(recData) != sizeEndCentDir:
-            # Zip file is corrupted.
-            return None
-        endrec = list(struct.unpack(structEndArchive, recData))
-        commentSize = endrec[_ECD_COMMENT_SIZE]  # as claimed by the zip file
-        comment = data[start+sizeEndCentDir:start+sizeEndCentDir+commentSize]
-        endrec.append(comment)
-        endrec.append(maxCommentStart + start)
 
-        # Try to read the "Zip64 end of central directory" structure
-        return _EndRecData64(fpin, maxCommentStart + start - filesize,
-                             endrec)
+    candidates = []
+    start = data.find(stringEndArchive)
+    while start >= 0:
+        candidate = _EndRecCandidate(fpin, data, start,
+                                     maxCommentStart, filesize)
+        if candidate is not None:
+            candidates.append(candidate)
+        start = data.find(stringEndArchive, start + 1)
 
-    # Unable to find a valid end of central directory structure
-    return None
+    if not candidates:
+        # Unable to find a valid end of central directory structure
+        return None
+
+    endrec, members = candidates[0]
+    for other_endrec, other_members in candidates[1:]:
+        if other_members != members:
+            # Several valid end-of-central-directory records describe
+            # different member sets: refuse to pick one arbitrarily.
+            details = []
+            for candidate_endrec, _ in candidates:
+                dir_end = candidate_endrec[_ECD_LOCATION]
+                if candidate_endrec[_ECD_SIGNATURE] == stringEndArchive64:
+                    dir_end -= sizeEndCentDir64 + sizeEndCentDir64Locator
+                cd_end = dir_end
+                cd_start = cd_end - candidate_endrec[_ECD_SIZE]
+                details.append(
+                    "end record at offset %d claims central directory "
+                    "[%d, %d) with %d entries" % (
+                        candidate_endrec[_ECD_LOCATION],
+                        cd_start, cd_end,
+                        candidate_endrec[_ECD_ENTRIES_TOTAL]))
+            raise BadZipFile(
+                "Ambiguous ZIP archive: multiple inconsistent "
+                "end-of-central-directory records (%s)" % "; ".join(details))
+    return endrec
 
 
 class ZipInfo (object):

@@ -2,6 +2,19 @@
 History
 =======
 
+unreleased
+----------
+* Strictly select the end-of-central-directory record when reading
+  archives.  Every EOCD signature near the end of the file is now
+  validated for consistency with its central directory range, entry
+  counts, comment length and ZIP64 locator, instead of relying on the
+  last signature occurrence.  Archives containing several structurally
+  valid end-of-central-directory records that disagree about their
+  members (e.g. a fake empty directory appended to the tail, or a second
+  archive hidden in the comment) are rejected with a ``BadZipFile``
+  error reporting each candidate's position and claimed directory
+  range, before any decryption or extraction takes place.
+
 0.4.0 (2026-05-13)
 ------------------
 * Update package to use pyproject.toml

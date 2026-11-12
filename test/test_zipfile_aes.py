@@ -1237,5 +1237,28 @@ class LzmaTestZip64InSmallFiles(AbstractTestZip64InSmallFiles,
     pwd = b'this is a test password'
 
 
+@requires_pycrypto
+class AmbiguousEndRecordTests(unittest.TestCase):
+    """Ambiguous archives are rejected before any decryption happens."""
+
+    def make_encrypted_zip(self, name, data, comment=b""):
+        bio = io.BytesIO()
+        with zipfile_aes.AESZipFile(bio, "w", zipfile.ZIP_STORED) as zipfp:
+            zipfp.setpassword(b"passwd")
+            zipfp.setencryption(zipfile_aes.WZ_AES, nbits=128)
+            zipfp.writestr(name, data)
+            zipfp.comment = comment
+        return bio.getvalue()
+
+    def test_ambiguous_archive_rejected_before_decryption(self):
+        inner = self.make_encrypted_zip("inner.txt", b"inner")
+        outer = self.make_encrypted_zip("outer.txt", b"outer", inner)
+        # The archive is rejected at open time, before any password
+        # verification or decryption of its members could take place.
+        with self.assertRaises(zipfile.BadZipFile) as cm:
+            zipfile_aes.AESZipFile(io.BytesIO(outer))
+        self.assertIn("Ambiguous", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
