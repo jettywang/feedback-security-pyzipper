@@ -35,6 +35,41 @@ Usage
        my_secrets = zf.read('test.txt')
 
 
+Strict Metadata Reading
+-----------------------
+
+Each ZIP entry stores its security-relevant metadata (encryption flag,
+compression method, and for WZ-AES entries the AES version, strength and
+actual compression algorithm) in two places: the central directory and the
+entry's local file header. Readers that trust different headers can
+interpret one archive two different ways, for example selecting different
+decryption or decompression algorithms. An upload scanner cannot treat such
+an archive as unambiguous.
+
+Pass ``strict_metadata=True`` when opening an archive for reading to reject
+entries whose two headers disagree. The check runs before any decrypter or
+decompressor is selected, and the error names both declaration locations
+and the conflicting field:
+
+.. code-block:: python
+
+   with pyzipper.AESZipFile('upload.zip', strict_metadata=True) as zf:
+       zf.setpassword(secret_password)
+       my_secrets = zf.read('test.txt')
+
+The strict policy cross-checks the encryption flag, compression method,
+WZ-AES version/vendor/strength, actual compression method, member name,
+CRC and sizes. Legitimate differences remain accepted: data descriptors
+(general purpose bit 3) allow zero CRC and size placeholders in the local
+header, and ZIP64 ``0xFFFFFFFF`` size placeholders are resolved through the
+local ZIP64 extra field rather than being treated as mismatches.
+
+The default (``strict_metadata=False``) preserves the historical compatible
+behaviour: the central directory remains the sole source of truth and no
+cross-check is performed, so archives readable by previous pyzipper
+releases stay readable.
+
+
 CRC32 Values
 ------------
 

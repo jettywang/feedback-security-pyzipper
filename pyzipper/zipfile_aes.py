@@ -10,11 +10,13 @@ from Cryptodome import Random
 from .zipfile import (
     ZIP_BZIP2,
     ZIP_LZMA,
+    EXTRA_ZIP64,
     BadZipFile,
     BaseZipDecrypter,
     ZipFile,
     ZipInfo,
     ZipExtFile,
+    _parse_extra_fields,
 )
 
 WZ_AES = 'WZ_AES'
@@ -272,6 +274,15 @@ class AESZipInfo(ZipInfo):
         self.wz_aes_vendor_id = None
         self.wz_aes_strength = None
 
+    @property
+    def central_compress_type(self):
+        # When WZ-AES is in use the central directory stores the WZ-AES
+        # marker (99); compress_type itself is overwritten with the actual
+        # compression method from the AES extra field.
+        if self.wz_aes_vendor_id is not None:
+            return WZ_AES_COMPRESS_TYPE
+        return self.compress_type
+
     def decode_extra_wz_aes(self, ln, extra):
         if ln == 7:
             counts = struct.unpack("<H2sBH", extra[4: ln+4])
@@ -367,6 +378,73 @@ class AESZipExtFile(ZipExtFile):
         if self._zinfo.wz_aes_version is not None:
             return self.setup_aeszipdecrypter()
         return super().setup_decrypter()
+
+    def _strict_check_local_aes_metadata(self, local_extra):
+        """Cross-check the WZ-AES extra field in the local header against the
+        values parsed from the central directory.
+
+        Runs before any decrypter is selected so that a local header which
+        would lead another implementation to pick a different AES version,
+        strength or underlying compression algorithm is rejected outright.
+        """
+        zinfo = self._zinfo
+        name = zinfo.filename
+        local_aes = [
+            data for xid, data in _parse_extra_fields(local_extra)
+            if xid == EXTRA_WZ_AES
+        ]
+        central_has_aes = zinfo.wz_aes_vendor_id is not None
+        if not local_aes:
+            if central_has_aes:
+                raise BadZipFile(
+                    "Conflicting WZ-AES metadata for %r: WZ-AES extra field "
+                    "present in central directory but missing from local "
+                    "file header" % name
+                )
+            return
+        if not central_has_aes:
+            raise BadZipFile(
+                "Conflicting WZ-AES metadata for %r: WZ-AES extra field "
+                "present in local file header but missing from central "
+                "directory" % name
+            )
+        if len(local_aes) > 1:
+            raise BadZipFile(
+                "Corrupt WZ-AES extra field for %r: multiple records in "
+                "local file header" % name
+            )
+        data = local_aes[0]
+        if len(data) != 7:
+            raise BadZipFile(
+                "Corrupt extra field %04x (size=%d)"
+                % (EXTRA_WZ_AES, len(data))
+            )
+        local_version, local_vendor_id, local_strength, local_method = \
+            struct.unpack("<H2sBH", data)
+
+        def raise_conflict(field, central_value, local_value):
+            raise BadZipFile(
+                "Conflicting %s for %r: central directory declares %r but "
+                "local file header declares %r"
+                % (field, name, central_value, local_value)
+            )
+
+        if local_version != zinfo.wz_aes_version:
+            raise_conflict(
+                "WZ-AES version (AE-1/AE-2)",
+                zinfo.wz_aes_version, local_version)
+        if local_vendor_id != zinfo.wz_aes_vendor_id:
+            raise_conflict(
+                "WZ-AES vendor id",
+                zinfo.wz_aes_vendor_id, local_vendor_id)
+        if local_strength != zinfo.wz_aes_strength:
+            raise_conflict(
+                "WZ-AES encryption strength",
+                zinfo.wz_aes_strength, local_strength)
+        if local_method != zinfo.compress_type:
+            raise_conflict(
+                "actual compression method under WZ-AES",
+                zinfo.compress_type, local_method)
 
     def check_wz_aes(self):
         if self._zinfo.compress_type == ZIP_LZMA:

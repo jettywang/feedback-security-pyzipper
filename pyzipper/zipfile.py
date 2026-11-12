@@ -193,6 +193,26 @@ _DD_SIGNATURE = 0x08074b50
 _EXTRA_FIELD_STRUCT = struct.Struct('<HH')
 
 
+def _parse_extra_fields(extra):
+    """Parse a ZIP extra field block into an ordered list of (id, data) tuples.
+
+    Raises BadZipFile if the block is truncated or otherwise malformed.
+    """
+    fields = []
+    while len(extra) >= 4:
+        xid, xlen = _EXTRA_FIELD_STRUCT.unpack(extra[:4])
+        end = 4 + xlen
+        if end > len(extra):
+            raise BadZipFile(
+                "Corrupt extra field %04x (size=%d)" % (xid, xlen)
+            )
+        fields.append((xid, extra[4:end]))
+        extra = extra[end:]
+    if extra:
+        raise BadZipFile("Corrupt extra field block (trailing bytes)")
+    return fields
+
+
 def _strip_extra(extra, xids):
     # Remove Extra Fields with specified IDs.
     unpack = _EXTRA_FIELD_STRUCT.unpack
@@ -440,6 +460,16 @@ class ZipInfo (object):
     @property
     def is_encrypted(self):
         return self.flag_bits & _MASK_ENCRYPTED
+
+    @property
+    def central_compress_type(self):
+        """Compression method as declared in the central directory.
+
+        For WZ-AES entries the effective compression method is overwritten by
+        the AES extra field while the central directory still carries the
+        WZ-AES marker (99). Subclasses override this property as needed.
+        """
+        return self.compress_type
 
     @property
     def is_utf_filename(self):
@@ -1163,11 +1193,13 @@ class ZipExtFile(io.BufferedIOBase):
     # Chunk size to read during seek
     MAX_SEEK_READ = 1 << 24
 
-    def __init__(self, fileobj, mode, zipinfo, close_fileobj=False, pwd=None):
+    def __init__(self, fileobj, mode, zipinfo, close_fileobj=False, pwd=None,
+                 strict_metadata=False):
         self._fileobj = fileobj
         self._zinfo = zipinfo
         self._close_fileobj = close_fileobj
         self._pwd = pwd
+        self._strict_metadata = strict_metadata
 
         self.process_local_header()
         self.raise_for_unsupported_flags()
@@ -1236,8 +1268,10 @@ class ZipExtFile(io.BufferedIOBase):
             raise BadZipFile("Bad magic number for file header")
 
         fname = self._fileobj.read(fheader[_FH_FILENAME_LENGTH])
+        local_extra = b''
         if fheader[_FH_EXTRA_FIELD_LENGTH]:
-            self._fileobj.read(fheader[_FH_EXTRA_FIELD_LENGTH])
+            local_extra = self._fileobj.read(
+                fheader[_FH_EXTRA_FIELD_LENGTH])
 
         if self._zinfo.is_utf_filename:
             # UTF-8 filename
@@ -1249,6 +1283,125 @@ class ZipExtFile(io.BufferedIOBase):
             raise BadZipFile(
                 'File name in directory %r and header %r differ.'
                 % (self._zinfo.orig_filename, fname))
+
+        # Keep the raw local header so strict mode can cross-check the
+        # security-relevant metadata before any decrypter or decompressor is
+        # selected.
+        self._local_header = fheader
+        self._local_extra = local_extra
+        if self._strict_metadata:
+            self._strict_check_local_header(fheader, local_extra)
+
+    def _strict_check_local_header(self, fheader, local_extra):
+        """Reject entries whose local header disagrees with the central
+        directory on security-relevant metadata.
+
+        Different decompressors can interpret a conflicting entry in
+        different ways (for example choosing an AES decrypter based on the
+        central directory while another tool follows the local header). Such
+        archives are rejected here, before any decrypter or decompressor is
+        instantiated.
+
+        Legitimate differences are allowed:
+          * data descriptors (flag bit 3) mean the local CRC and sizes may
+            legitimately be zero placeholders;
+          * ZIP64 placeholders (0xFFFFFFFF) are resolved via the local
+            ZIP64 extra field.
+        """
+        zinfo = self._zinfo
+        name = zinfo.filename
+
+        def raise_conflict(field, central_value, local_value):
+            raise BadZipFile(
+                "Conflicting %s for %r: central directory declares %r but "
+                "local file header declares %r"
+                % (field, name, central_value, local_value)
+            )
+
+        # Encryption flag (general purpose bit 0).
+        central_encrypted = bool(zinfo.flag_bits & _MASK_ENCRYPTED)
+        local_encrypted = bool(
+            fheader[_FH_GENERAL_PURPOSE_FLAG_BITS] & _MASK_ENCRYPTED)
+        if central_encrypted != local_encrypted:
+            raise_conflict(
+                "encryption flag (general purpose bit 0)",
+                central_encrypted, local_encrypted)
+
+        # Compression method (this is 99 for WZ-AES entries).
+        central_method = zinfo.central_compress_type
+        local_method = fheader[_FH_COMPRESSION_METHOD]
+        if central_method != local_method:
+            raise_conflict(
+                "compression method", central_method, local_method)
+
+        # WZ-AES extra field metadata (version, vendor, strength, actual
+        # compression method).
+        self._strict_check_local_aes_metadata(local_extra)
+
+        # CRC and sizes. With a data descriptor the local values are
+        # legitimately zero placeholders, and ZIP64 entries use 0xFFFFFFFF
+        # placeholders which are resolved through the local ZIP64 extra
+        # field.
+        uses_descriptor = bool(
+            zinfo.flag_bits & _MASK_USE_DATA_DESCRIPTOR
+            or fheader[_FH_GENERAL_PURPOSE_FLAG_BITS]
+            & _MASK_USE_DATA_DESCRIPTOR
+        )
+        if not uses_descriptor:
+            local_crc = fheader[_FH_CRC]
+            if local_crc != zinfo.CRC:
+                raise_conflict(
+                    "CRC-32", zinfo.CRC, local_crc)
+
+            local_compress_size = fheader[_FH_COMPRESSED_SIZE]
+            local_file_size = fheader[_FH_UNCOMPRESSED_SIZE]
+            if (local_compress_size == 0xFFFFFFFF
+                    or local_file_size == 0xFFFFFFFF
+                    or zinfo.compress_size > ZIP64_LIMIT
+                    or zinfo.file_size > ZIP64_LIMIT):
+                zip64_sizes = self._read_local_zip64_sizes(local_extra)
+                if zip64_sizes is not None:
+                    local_compress_size, local_file_size = zip64_sizes
+            if local_compress_size != zinfo.compress_size:
+                raise_conflict(
+                    "compressed size",
+                    zinfo.compress_size, local_compress_size)
+            if local_file_size != zinfo.file_size:
+                raise_conflict(
+                    "uncompressed size",
+                    zinfo.file_size, local_file_size)
+
+    def _read_local_zip64_sizes(self, local_extra):
+        """Resolve compressed/uncompressed sizes from a local ZIP64 extra
+        field.
+
+        The local ZIP64 extra field must contain both sizes when either
+        32-bit size field is a 0xFFFFFFFF placeholder (APPNOTE 4.5.3).
+        This helper is only called once such a placeholder has been seen.
+        """
+        for xid, data in _parse_extra_fields(local_extra):
+            if xid != EXTRA_ZIP64:
+                continue
+            if len(data) < 16:
+                raise BadZipFile(
+                    "Corrupt zip64 extra field in local file header "
+                    "(size=%d)" % len(data)
+                )
+            file_size, compress_size = struct.unpack('<QQ', data[:16])
+            return compress_size, file_size
+        raise BadZipFile(
+            "ZIP64 size placeholder in local file header without a "
+            "ZIP64 extra field for %r" % self._zinfo.filename
+        )
+
+    def _strict_check_local_aes_metadata(self, local_extra):
+        """Hook for WZ-AES metadata cross-checks.
+
+        The base implementation has no AES extra field to check; AESZipExtFile
+        overrides it.
+        """
+        return None
+
 
     def raise_for_unsupported_flags(self):
         if self._zinfo.is_compressed_patch_data:
@@ -1691,9 +1844,19 @@ class ZipFile:
     zipwritefile_cls = _ZipWriteFile
 
     def __init__(self, file, mode="r", compression=ZIP_STORED, allowZip64=True,
-                 compresslevel=None, *, strict_timestamps=True):
+                 compresslevel=None, *, strict_timestamps=True,
+                 strict_metadata=False):
         """Open the ZIP file with mode read 'r', write 'w', exclusive create
-        'x', or append 'a'."""
+        'x', or append 'a'.
+
+        strict_metadata: when reading, reject entries whose local file header
+            disagrees with the central directory on security-relevant
+            metadata (encryption flag, compression method, WZ-AES version and
+            strength, member name, CRC and sizes). Data descriptors and
+            ZIP64 placeholder sizes remain accepted. Defaults to False for
+            backwards compatibility, in which case the central directory
+            remains the sole source of truth, as in previous releases.
+        """
         if mode not in ('r', 'w', 'x', 'a'):
             raise ValueError("ZipFile requires mode 'r', 'w', 'x', or 'a'")
 
@@ -1712,6 +1875,7 @@ class ZipFile:
         self.encryption_kwargs = None
         self._comment = b''
         self._strict_timestamps = strict_timestamps
+        self._strict_metadata = strict_metadata
 
         # Check if we were passed a file-like object
         # os.PathLike and os.fspath were added in python 3.6
@@ -2020,7 +2184,9 @@ class ZipFile:
         zef_file = _SharedFile(self.fp, zinfo.header_offset,
                                self._fpclose, self._lock, lambda: self._writing)
         try:
-            return self.zipextfile_cls(zef_file, mode, zinfo, True, pwd)
+            return self.zipextfile_cls(
+                zef_file, mode, zinfo, True, pwd,
+                strict_metadata=self._strict_metadata)
         except Exception as e:
             zef_file.close()
             raise e
@@ -2361,14 +2527,15 @@ class PyZipFile(ZipFile):
     """Class to create ZIP archives with Python library files and packages."""
 
     def __init__(self, file, mode="r", compression=ZIP_STORED,
-                 allowZip64=True, optimize=-1):
+                 allowZip64=True, optimize=-1, *, strict_metadata=False):
 
         if sys.version_info[0:2] < (3, 5):
             raise NotImplementedError(
                 "pyzipper.PyZipFile doesn't work for versions less than 3.5"
             )
         ZipFile.__init__(self, file, mode=mode, compression=compression,
-                         allowZip64=allowZip64)
+                         allowZip64=allowZip64,
+                         strict_metadata=strict_metadata)
         self._optimize = optimize
 
     def writepy(self, pathname, basename="", filterfunc=None):

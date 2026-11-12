@@ -2,6 +2,17 @@
 History
 =======
 
+Unreleased
+----------
+* Add a strict reading policy (``strict_metadata=True``) that rejects entries
+  whose local file header disagrees with the central directory on
+  security-relevant metadata: the encryption flag, compression method,
+  WZ-AES version/strength/vendor, actual compression algorithm, member name,
+  CRC and sizes. Conflicts are raised before any decrypter or decompressor is
+  selected and the error identifies both declaration locations. Data
+  descriptors and ZIP64 placeholder sizes remain valid. The default
+  compatible interface is unchanged and still trusts the central directory.
+
 0.4.0 (2026-05-13)
 ------------------
 * Update package to use pyproject.toml
