@@ -1,8 +1,10 @@
+import hashlib
 import io
 import os
 import struct
 import time
 import unittest
+import zlib
 from random import randint, random
 
 from test.support import unlink
@@ -10,6 +12,7 @@ from .test_zipfile import (
     TESTFN, TESTFN2, Unseekable, get_files, requires_bz2, requires_zlib, requires_lzma,
 )
 
+import pyzipper
 from pyzipper import zipfile
 from pyzipper import zipfile_aes
 
@@ -1235,6 +1238,292 @@ class LzmaTestZip64InSmallFiles(AbstractTestZip64InSmallFiles,
     encryption = zipfile_aes.WZ_AES
     encryption_kwargs = {'nbits': 128}
     pwd = b'this is a test password'
+
+
+@requires_pycrypto
+class ArchiveAuditTests(unittest.TestCase):
+    """Pre-publish audit of per-member encryption attributes."""
+
+    pwd = b'audit password'
+
+    def tearDown(self):
+        try:
+            unlink(TESTFN)
+        except FileNotFoundError:
+            pass
+
+    def make_policy(self, **kwargs):
+        defaults = {
+            'require_encryption': True,
+            'allowed_methods': (pyzipper.ENCRYPTION_WZ_AES,),
+            'min_aes_strength': 256,
+            'require_integrity': True,
+        }
+        defaults.update(kwargs)
+        return pyzipper.EncryptionPolicy(**defaults)
+
+    def write_plain_members(self, entries):
+        with zipfile_aes.AESZipFile(TESTFN, 'w') as zipfp:
+            for arcname, data in entries:
+                zipfp.writestr(arcname, data)
+
+    def append_aes_members(self, entries, nbits=256):
+        with zipfile_aes.AESZipFile(
+                TESTFN, 'a',
+                encryption=zipfile_aes.WZ_AES,
+                encryption_kwargs={'nbits': nbits}) as zipfp:
+            zipfp.setpassword(self.pwd)
+            for arcname, data in entries:
+                zipfp.writestr(arcname, data)
+
+    def test_legacy_plaintext_members_not_hidden_by_appended_aes(self):
+        """Appending AES members must not mark old plaintext members encrypted."""
+        self.write_plain_members([('legacy.txt', b'plain content')])
+        self.append_aes_members([('new.txt', b'secret content')])
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        self.assertFalse(bool(report))
+        self.assertEqual(len(report.entries), 2)
+        self.assertEqual(len(report.failures), 1)
+        failure = report.failures[0]
+        self.assertEqual(failure.filename, 'legacy.txt')
+        self.assertEqual(failure.encryption, pyzipper.ENCRYPTION_NONE)
+        self.assertFalse(failure.has_integrity)
+        self.assertIn('member is not encrypted', failure.reasons)
+        compliant = [e for e in report.entries if e.compliant]
+        self.assertEqual(len(compliant), 1)
+        self.assertEqual(compliant[0].filename, 'new.txt')
+        self.assertEqual(compliant[0].encryption, pyzipper.ENCRYPTION_WZ_AES)
+        self.assertEqual(compliant[0].aes_strength, 256)
+        self.assertTrue(compliant[0].has_integrity)
+
+    def test_all_members_compliant_archive_conforms(self):
+        """An archive where every member satisfies the policy is publishable."""
+        self.write_plain_members([])
+        self.append_aes_members([
+            ('a.txt', b'alpha'),
+            ('b.txt', b'beta'),
+        ])
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertTrue(report.conforms)
+        self.assertTrue(bool(report))
+        self.assertEqual(report.failures, ())
+        self.assertEqual(len(report.entries), 2)
+
+    def test_zipcrypto_member_reported_as_weak(self):
+        """Traditional ZipCrypto members are reported, not treated as AES."""
+        self.write_zipcrypto_archive(
+            TESTFN, 'weak.txt', b'zipcrypto content', self.pwd)
+        # The fixture is a genuine ZipCrypto archive: it must round-trip.
+        with zipfile_aes.AESZipFile(TESTFN, 'r') as zipfp:
+            self.assertEqual(
+                zipfp.read('weak.txt', pwd=self.pwd), b'zipcrypto content')
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        self.assertEqual(len(report.failures), 1)
+        failure = report.failures[0]
+        self.assertEqual(failure.filename, 'weak.txt')
+        self.assertEqual(failure.encryption, pyzipper.ENCRYPTION_ZIPCRYPTO)
+        self.assertFalse(failure.has_integrity)
+        self.assertIn(
+            "encryption method 'zipcrypto' is not allowed by the policy",
+            failure.reasons)
+        self.assertIn(
+            'member has no integrity protection (authentication code)',
+            failure.reasons)
+
+    def test_aes_strength_below_policy_minimum(self):
+        """AES-128 members fail a policy requiring AES-256."""
+        self.write_plain_members([])
+        self.append_aes_members([('weak-aes.txt', b'data')], nbits=128)
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        failure = report.failures[0]
+        self.assertEqual(failure.encryption, pyzipper.ENCRYPTION_WZ_AES)
+        self.assertEqual(failure.aes_strength, 128)
+        self.assertIn(
+            'AES-128 is below the required minimum of AES-256',
+            failure.reasons)
+
+        relaxed = pyzipper.audit_archive(
+            TESTFN, self.make_policy(min_aes_strength=128))
+        self.assertTrue(relaxed.conforms)
+
+    def test_duplicate_name_entries_are_all_audited(self):
+        """Appending leaves multiple central directory entries per name."""
+        self.write_plain_members([('same.txt', b'old plaintext')])
+        self.append_aes_members([('same.txt', b'new secret')])
+
+        with zipfile_aes.AESZipFile(TESTFN, 'r') as zipfp:
+            # The name index only keeps the last entry for the name.
+            self.assertEqual(len(zipfp.infolist()), 2)
+            last = zipfp.getinfo('same.txt')
+            self.assertTrue(last.is_encrypted)
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        self.assertEqual(len(report.entries), 2)
+        self.assertEqual(
+            [entry.filename for entry in report.entries],
+            ['same.txt', 'same.txt'])
+        self.assertEqual(len(report.failures), 1)
+        failure = report.failures[0]
+        self.assertEqual(failure.encryption, pyzipper.ENCRYPTION_NONE)
+        # The failing entry is the older one, identified by its offset.
+        self.assertNotEqual(failure.header_offset, last.header_offset)
+        self.assertIn('member is not encrypted', failure.reasons)
+
+    def test_audit_ignores_zipfile_default_encryption_config(self):
+        """Defaults set on the ZipFile object do not affect the audit."""
+        self.write_plain_members([('plain.txt', b'plain')])
+        with zipfile_aes.AESZipFile(
+                TESTFN, 'r',
+                encryption=zipfile_aes.WZ_AES,
+                encryption_kwargs={'nbits': 256}) as zipfp:
+            zipfp.setpassword(self.pwd)
+            report = pyzipper.audit_zipfile(zipfp, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        self.assertEqual(
+            report.failures[0].encryption, pyzipper.ENCRYPTION_NONE)
+
+    def test_strong_encryption_flag_is_rejected_as_unsupported(self):
+        """Members with strong encryption (flag bit 6) cannot be verified."""
+        self.write_encrypted_archive(
+            TESTFN, 'strong.txt', b'data', self.pwd, strong=True)
+
+        report = pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        self.assertFalse(report.conforms)
+        failure = report.failures[0]
+        self.assertEqual(failure.encryption, pyzipper.ENCRYPTION_STRONG)
+        self.assertIn(
+            'strong encryption (general purpose flag bit 6) is not '
+            'supported and cannot be verified',
+            failure.reasons)
+
+    def test_policy_rejects_unsupported_claims(self):
+        with self.assertRaises(ValueError):
+            pyzipper.EncryptionPolicy(allowed_methods=('aes-512-gcm',))
+        with self.assertRaises(ValueError):
+            pyzipper.EncryptionPolicy(min_aes_strength=512)
+
+    def test_policy_rejects_conflicting_claims(self):
+        with self.assertRaises(ValueError):
+            pyzipper.EncryptionPolicy(
+                require_encryption=True,
+                allowed_methods=(
+                    pyzipper.ENCRYPTION_NONE, pyzipper.ENCRYPTION_WZ_AES))
+        with self.assertRaises(ValueError):
+            pyzipper.EncryptionPolicy(
+                require_encryption=True,
+                allowed_methods=(pyzipper.ENCRYPTION_NONE,))
+        with self.assertRaises(ValueError):
+            pyzipper.EncryptionPolicy(
+                require_encryption=False,
+                require_integrity=True,
+                allowed_methods=(pyzipper.ENCRYPTION_NONE,))
+
+    def test_audit_requires_a_policy_instance(self):
+        self.write_plain_members([('a.txt', b'data')])
+        with self.assertRaises(TypeError):
+            pyzipper.audit_archive(TESTFN, pyzipper.EncryptionPolicy)
+        with self.assertRaises(TypeError):
+            pyzipper.audit_archive(TESTFN, None)
+
+    def test_audit_does_not_modify_the_archive(self):
+        self.write_plain_members([('legacy.txt', b'plain content')])
+        self.append_aes_members([('new.txt', b'secret content')])
+        with open(TESTFN, 'rb') as fp:
+            digest_before = hashlib.sha256(fp.read()).hexdigest()
+
+        pyzipper.audit_archive(TESTFN, self.make_policy())
+
+        with open(TESTFN, 'rb') as fp:
+            digest_after = hashlib.sha256(fp.read()).hexdigest()
+        self.assertEqual(digest_before, digest_after)
+
+    # -- helpers to build genuine traditional-encryption fixtures --------
+
+    _crctable = None
+
+    @classmethod
+    def _zipcrypto_encrypter(cls, pwd):
+        if cls._crctable is None:
+            cls._crctable = [zipfile._gen_crc(i) for i in range(256)]
+        crctable = cls._crctable
+
+        def crc32_byte(ch, crc):
+            return (crc >> 8) ^ crctable[(crc ^ ch) & 0xFF]
+
+        keys = [0x12345678, 0x23456789, 0x34567890]
+
+        def update_keys(c):
+            keys[0] = crc32_byte(c, keys[0])
+            keys[1] = (keys[1] + (keys[0] & 0xff)) & 0xffffffff
+            keys[1] = (keys[1] * 134775813 + 1) & 0xffffffff
+            keys[2] = crc32_byte(keys[1] >> 24, keys[2])
+
+        for c in pwd:
+            update_keys(c)
+
+        def encrypt(data):
+            out = bytearray()
+            for c in data:
+                temp = (keys[2] | 2) & 0xffff
+                k = ((temp * (temp ^ 1)) >> 8) & 0xff
+                update_keys(c)
+                out.append(c ^ k)
+            return bytes(out)
+
+        return encrypt
+
+    @classmethod
+    def write_encrypted_archive(cls, fname, arcname, data, pwd,
+                                strong=False):
+        """Write a single-member archive with traditional encryption."""
+        encrypt = cls._zipcrypto_encrypter(pwd)
+        crc = zlib.crc32(data)
+        header = bytes(randint(0, 255) for _ in range(11))
+        header += bytes([(crc >> 24) & 0xff])
+        encrypted = encrypt(header + data)
+
+        flag_bits = 0x1 | (0x40 if strong else 0x0)
+        name = arcname.encode('utf-8')
+        local = struct.pack(
+            '<4s5H3L2H',
+            b'PK\x03\x04', 20, flag_bits, zipfile.ZIP_STORED, 0, 0,
+            crc, len(encrypted), len(data), len(name), 0)
+        central = struct.pack(
+            '<4s6H3L5H2L',
+            b'PK\x01\x02', 20, 20, flag_bits, zipfile.ZIP_STORED, 0, 0,
+            crc, len(encrypted), len(data),
+            len(name), 0, 0, 0, 0, 0, 0)
+        end = struct.pack(
+            '<4s4H2LH',
+            b'PK\x05\x06', 0, 0, 1, 1,
+            len(central) + len(name), len(local) + len(name) + len(encrypted),
+            0)
+        with open(fname, 'wb') as fp:
+            fp.write(local)
+            fp.write(name)
+            fp.write(encrypted)
+            fp.write(central)
+            fp.write(name)
+            fp.write(end)
+
+    @classmethod
+    def write_zipcrypto_archive(cls, fname, arcname, data, pwd):
+        cls.write_encrypted_archive(fname, arcname, data, pwd)
 
 
 if __name__ == "__main__":
