@@ -1629,7 +1629,8 @@ class _ZipWriteFile(io.BufferedIOBase):
         self._zinfo.CRC = self._crc
         self._zinfo.file_size = self._file_size
         if self._encrypter:
-            self._encrypter.finalize_zipinfo(self._zinfo)
+            self._encrypter.finalize_zipinfo(
+                self._zinfo, seekable=self._zipfile._seekable)
 
         if not self._zip64:
             if self._file_size > ZIP64_LIMIT:
@@ -2048,7 +2049,7 @@ class ZipFile:
         if pwd is not None or self.encryption is not None:
             zinfo.flag_bits |= _MASK_ENCRYPTED
             encrypter = self.get_encrypter()
-            encrypter.update_zipinfo(zinfo)
+            encrypter.update_zipinfo(zinfo, seekable=self._seekable)
         if zinfo.compress_type == ZIP_LZMA:
             # Compressed data includes an end-of-stream (EOS) marker
             zinfo.flag_bits |= _MASK_COMPRESS_OPTION_1

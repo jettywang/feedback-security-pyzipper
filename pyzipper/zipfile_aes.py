@@ -86,20 +86,32 @@ class AESZipDecrypter(BaseZipDecrypter):
 
 class BaseZipEncrypter:
 
-    def update_zipinfo(self, zipinfo):
-        """Called when zip entry is opened for write and the encrypted is configured."""
+    def update_zipinfo(self, zipinfo, seekable):
+        """Configure the zipinfo before its local file header is written.
+
+        Called once, immediately before the local file header is emitted, at
+        which point the member's final size is generally still unknown.
+
+        ``seekable`` states whether the underlying archive stream supports
+        seeking back to rewrite the local file header when the member is
+        closed. Every property which is encoded in the local file header
+        (encryption format/version, flags, ...) must be given its final value
+        here when ``seekable`` is False: the bytes will already have left the
+        process and can never be revised.
+        """
         raise NotImplementedError(
             'BaseZipEncrypter implementations must implement `update_zipinfo`.'
         )
 
-    def finalize_zipinfo(self, zipinfo):
-        """Updates the zipinfo instance when the zip entry is being closed.
+    def finalize_zipinfo(self, zipinfo, seekable):
+        """Update the zipinfo instance when the zip entry is being closed.
 
-        It may be possible to update some fields based on information that
-        wasn't available when update_zipinfo was called. This function should
-        not change properties that would need to be written to the local file
-        header if the underlying zip is not seekable as it isn't possible to
-        return to the local file header to rewrite the new values.
+        Some fields can only be computed once all the member data has been
+        processed (sizes, CRC-32, ...). When ``seekable`` is True the local
+        file header is rewritten afterwards and those fields may be revised;
+        when ``seekable`` is False the local file header has already been
+        emitted with the values chosen in ``update_zipinfo``, so this method
+        must not change any property that is encoded in the local file header.
         """
         raise NotImplementedError(
             'BaseZipEncrypter implementations must implement `finalize_zipinfo`.'
@@ -176,6 +188,10 @@ class AESZipEncrypter(BaseZipEncrypter):
         self.force_wz_aes_version = force_wz_aes_version
         self.conditionally_include_crc = conditionally_include_crc
         self.min_bytes_to_include_crc = min_bytes_to_include_crc
+        # Set in ``update_zipinfo`` once the local file header format is
+        # committed; ``finalize_zipinfo`` relies on it for unseekable streams
+        # where the local header cannot be rewritten.
+        self._frozen_wz_aes_version = None
         salt_lengths = {
             128: 8,
             192: 12,
@@ -230,18 +246,55 @@ class AESZipEncrypter(BaseZipEncrypter):
             return WZ_AES_V1
         return WZ_AES_V2
 
-    def update_zipinfo(self, zipinfo):
+    def update_zipinfo(self, zipinfo, seekable):
+        # The AES vendor version is part of the WZ AES extra field which is
+        # encoded into the local file header. The version therefore has to be
+        # selected here, before that header is written, based only on
+        # information already available (explicit override, compression type
+        # and any pre-declared file size).
+        #
+        # Contracts:
+        #   * force_wz_aes_version always wins and is honoured on every kind
+        #     of stream.
+        #   * Automatic selection (no explicit override) uses the rules in
+        #     ``compute_aes_version``. On an unseekable stream the result is
+        #     frozen for the whole entry: the member size may still be
+        #     unknown, so a version which depended on the final size could
+        #     never be reconciled with the already emitted local header.
+        #   * On a seekable stream the local header is rewritten when the
+        #     entry closes, so automatic selection may be recomputed there
+        #     against the final member size (see ``finalize_zipinfo``).
         zipinfo.wz_aes_vendor_id = WZ_AES_VENDOR_ID
         zipinfo.wz_aes_strength = self.aes_strength
-        zipinfo.wz_aes_version = self.compute_aes_version(zipinfo)
+        self._frozen_wz_aes_version = self.compute_aes_version(zipinfo)
+        zipinfo.wz_aes_version = self._frozen_wz_aes_version
 
-    def finalize_zipinfo(self, zipinfo):
-        # If we can't seek back, we have to keep the aes version we specified
-        # when the local file header was written. If the file size is unknown,
-        # this should be ae-2
-        if not zipinfo.use_datadescripter:
-            # We can go back and change the aes version we specified earlier.
-            zipinfo.wz_aes_version = self.compute_aes_version(zipinfo)
+    def finalize_zipinfo(self, zipinfo, seekable):
+        if not seekable:
+            # The local file header can never be rewritten, so it must keep
+            # describing exactly the AES version that was committed in
+            # ``update_zipinfo``. Recomputing here from the now-known member
+            # size (e.g. the conditional CRC threshold) would make the central
+            # directory and data descriptor disagree with the local header.
+            if zipinfo.wz_aes_version != self._frozen_wz_aes_version:
+                raise RuntimeError(
+                    "The WZ AES version of file %r was changed from %d to %d "
+                    "after its local file header was written to an "
+                    "unseekable stream."
+                    % (
+                        zipinfo.filename,
+                        self._frozen_wz_aes_version,
+                        zipinfo.wz_aes_version,
+                    )
+                )
+            zipinfo.wz_aes_version = self._frozen_wz_aes_version
+            return
+
+        # Seekable output: the local file header is rewritten with this
+        # ZipInfo when the entry closes, so the automatic choice may be revised
+        # against information (the final member size) that wasn't available
+        # when the header was first emitted.
+        zipinfo.wz_aes_version = self.compute_aes_version(zipinfo)
 
     def encryption_header(self):
         return self.salt + self.encpwdverify

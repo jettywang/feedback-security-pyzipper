@@ -797,10 +797,512 @@ class WZAESTests(unittest.TestCase):
                 fp.read()
 
 
+class _NonSeekableShortWrite:
+    """Write-only sink that rejects seeking and performs short writes.
+
+    Each ``write`` pushes data to the underlying sink in bounded chunks (at
+    most ``max_write`` bytes per sink write), like a socket or pipe that
+    accepts fewer bytes than requested. The full payload is still transferred
+    before the call returns, so the reported byte count is always the complete
+    input length as a well-behaved writer loop requires.
+    """
+
+    def __init__(self, sink, max_write=7):
+        self._sink = sink
+        self._max_write = max_write
+        self._offset = 0
+
+    def write(self, data):
+        view = memoryview(data)
+        total = len(view)
+        while view:
+            chunk = bytes(view[:self._max_write])
+            written = self._sink.write(chunk)
+            if not written:
+                raise BlockingIOError('underlying sink accepted no bytes')
+            view = view[written:]
+            self._offset += written
+        return total
+
+    def flush(self):
+        self._sink.flush()
+
+    def tell(self):
+        return self._offset
+
+    def seek(self, *args):
+        raise io.UnsupportedOperation('stream is not seekable')
+
+    def seekable(self):
+        return False
+
+
+def _parse_aes_extra(extra):
+    while len(extra) >= 4:
+        tp, ln = struct.unpack('<HH', extra[:4])
+        if tp == zipfile_aes.EXTRA_WZ_AES:
+            version, vendor, strength, method = struct.unpack(
+                '<H2sBH', extra[4:4 + ln])
+            return {
+                'version': version,
+                'vendor': vendor,
+                'strength': strength,
+                'method': method,
+            }
+        extra = extra[4 + ln:]
+    return None
+
+
+def _find_eocd(raw):
+    # The EOCD is the final record. A signature inside member data can only be
+    # a false match if its declared comment does not reach EOF, so validate
+    # the comment length while scanning backwards.
+    scan_start = max(
+        0, len(raw) - (zipfile.ZIP_MAX_COMMENT + zipfile.sizeEndCentDir))
+    pos = raw.rfind(zipfile.stringEndArchive, scan_start)
+    while pos != -1 and pos + zipfile.sizeEndCentDir <= len(raw):
+        comment_len = struct.unpack(
+            '<H',
+            raw[pos + zipfile.sizeEndCentDir - 2:
+                pos + zipfile.sizeEndCentDir],
+        )[0]
+        if pos + zipfile.sizeEndCentDir + comment_len == len(raw):
+            return pos
+        pos = raw.rfind(zipfile.stringEndArchive, scan_start, pos)
+    raise zipfile.BadZipFile('end of central directory record not found')
+
+
+def _parse_archive(raw):
+    """Independently split local headers, member data, data descriptors and
+    central directory records.
+
+    Central directory offsets and sizes drive navigation, so random bytes
+    inside the encrypted member data cannot be mistaken for record
+    signatures.
+    """
+    eocd_pos = _find_eocd(raw)
+    eocd = struct.unpack(
+        zipfile.structEndArchive,
+        raw[eocd_pos:eocd_pos + zipfile.sizeEndCentDir],
+    )
+    cd_count = eocd[zipfile._ECD_ENTRIES_TOTAL]
+    pos = eocd[zipfile._ECD_OFFSET]
+
+    entries = {}
+    for _ in range(cd_count):
+        if raw[pos:pos + 4] != zipfile.stringCentralDir:
+            raise zipfile.BadZipFile('Bad magic number for central directory')
+        rec = struct.unpack(
+            zipfile.structCentralDir,
+            raw[pos:pos + zipfile.sizeCentralDir],
+        )
+        name_len = rec[zipfile._CD_FILENAME_LENGTH]
+        extra_len = rec[zipfile._CD_EXTRA_FIELD_LENGTH]
+        comment_len = rec[zipfile._CD_COMMENT_LENGTH]
+        name = raw[pos + zipfile.sizeCentralDir:
+                   pos + zipfile.sizeCentralDir + name_len].decode('utf-8')
+        extra = raw[pos + zipfile.sizeCentralDir + name_len:
+                    pos + zipfile.sizeCentralDir + name_len + extra_len]
+        entries[name] = {
+            'central': {
+                'flags': rec[zipfile._CD_FLAG_BITS],
+                'method': rec[zipfile._CD_COMPRESS_TYPE],
+                'crc': rec[zipfile._CD_CRC],
+                'csize': rec[zipfile._CD_COMPRESSED_SIZE],
+                'fsize': rec[zipfile._CD_UNCOMPRESSED_SIZE],
+                'aes': _parse_aes_extra(extra),
+                'header_offset': rec[zipfile._CD_LOCAL_HEADER_OFFSET],
+            },
+        }
+        pos += (zipfile.sizeCentralDir + name_len + extra_len + comment_len)
+
+    for name, entry in entries.items():
+        start = entry['central']['header_offset']
+        hdr = struct.unpack(
+            zipfile.structFileHeader,
+            raw[start:start + zipfile.sizeFileHeader],
+        )
+        if hdr[zipfile._FH_SIGNATURE] != zipfile.stringFileHeader:
+            raise zipfile.BadZipFile('Bad magic number for file header')
+        name_len = hdr[zipfile._FH_FILENAME_LENGTH]
+        extra_len = hdr[zipfile._FH_EXTRA_FIELD_LENGTH]
+        extra = raw[start + zipfile.sizeFileHeader + name_len:
+                    start + zipfile.sizeFileHeader + name_len + extra_len]
+        data_start = start + zipfile.sizeFileHeader + name_len + extra_len
+        data_end = data_start + entry['central']['csize']
+        dd_sig, dd_crc, dd_csize, dd_fsize = struct.unpack(
+            '<LLLL', raw[data_end:data_end + 16])
+        if dd_sig != zipfile._DD_SIGNATURE:
+            raise zipfile.BadZipFile('Missing data descriptor for %r' % name)
+        entry['local'] = {
+            'offset': start,
+            'flags': hdr[zipfile._FH_GENERAL_PURPOSE_FLAG_BITS],
+            'method': hdr[zipfile._FH_COMPRESSION_METHOD],
+            'crc': hdr[zipfile._FH_CRC],
+            'aes': _parse_aes_extra(extra),
+        }
+        entry['data_start'] = data_start
+        entry['data_end'] = data_end
+        entry['dd'] = {
+            'crc': dd_crc,
+            'csize': dd_csize,
+            'fsize': dd_fsize,
+            'offset': data_end,
+        }
+    return entries
+
+
+@requires_pycrypto
+class WZAESUnseekableVersionTests(unittest.TestCase):
+    """AES version selection for archives written to non-seekable streams.
+
+    The local file header, central directory, CRC handling, HMAC auth tail and
+    data descriptor must always describe the same AES format, even though the
+    member size is unknown when the local header is emitted.
+    """
+
+    pwd = b'fixed-vector-password'
+    min_bytes_to_include_crc = 20
+
+    def setUp(self):
+        # Fixed vectors spanning the empty member, below-boundary, exact
+        # boundary and above-boundary cases.
+        boundary = self.min_bytes_to_include_crc
+        self.vectors = {
+            'empty.bin': b'',
+            'small.bin': b'z' * (boundary - 1),
+            'boundary.bin': b'q' * boundary,
+            'large.bin': b'k' * (boundary * 5),
+        }
+        self.expected_crc = {
+            name: zipfile.crc32(data) & 0xffffffff
+            for name, data in self.vectors.items()
+        }
+
+    def build_archive(self, encryption_kwargs, *, use_open,
+                      compression=zipfile.ZIP_STORED, members=None):
+        sink = io.BytesIO()
+        members = self.vectors.items() if members is None else members
+        with zipfile_aes.AESZipFile(
+                _NonSeekableShortWrite(sink), 'w',
+                compression=compression) as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(zipfile_aes.WZ_AES, **encryption_kwargs)
+            for name, data in members:
+                if use_open:
+                    # Stream the member in chunks; its final size is unknown
+                    # when the local header is written.
+                    with zipfp.open(name, 'w') as zfout:
+                        for index in range(0, len(data), 11):
+                            zfout.write(data[index:index + 11])
+                else:
+                    # writestr declares the size up front.
+                    zipfp.writestr(name, data)
+        return sink.getvalue()
+
+    def assertHeadersDescribeOneFormat(self, raw, expected_versions):
+        entries = _parse_archive(raw)
+        self.assertEqual(set(entries), set(expected_versions))
+        for name, expected_version in expected_versions.items():
+            entry = entries[name]
+            local = entry['local']
+            central = entry['central']
+            descriptor = entry['dd']
+
+            # Both headers must carry an identical 0x9901 AES extra field.
+            self.assertIsNotNone(local['aes'])
+            self.assertIsNotNone(central['aes'])
+            self.assertEqual(local['aes'], central['aes'])
+            self.assertEqual(local['aes']['version'], expected_version)
+
+            # Compression method 99 and the data descriptor flag must agree.
+            self.assertEqual(local['method'],
+                             zipfile_aes.WZ_AES_COMPRESS_TYPE)
+            self.assertEqual(central['method'],
+                             zipfile_aes.WZ_AES_COMPRESS_TYPE)
+            self.assertTrue(
+                local['flags'] & zipfile._MASK_USE_DATA_DESCRIPTOR)
+            self.assertTrue(
+                central['flags'] & zipfile._MASK_USE_DATA_DESCRIPTOR)
+            self.assertEqual(central['header_offset'], local['offset'])
+
+            # Sizes in the data descriptor and central directory must match
+            # the actual encrypted member footprint on disk.
+            self.assertEqual(descriptor['csize'], central['csize'])
+            self.assertEqual(descriptor['fsize'], central['fsize'])
+            self.assertEqual(
+                entry['data_end'] - entry['data_start'],
+                descriptor['csize'],
+            )
+
+            if expected_version == zipfile_aes.WZ_AES_V2:
+                # AE-2: CRC is unused and must be zero everywhere.
+                self.assertEqual(local['crc'], 0)
+                self.assertEqual(central['crc'], 0)
+                self.assertEqual(descriptor['crc'], 0)
+            else:
+                # AE-1: the real fixed-vector CRC must be stored and agree.
+                self.assertEqual(central['crc'], self.expected_crc[name])
+                self.assertEqual(descriptor['crc'], self.expected_crc[name])
+        return entries
+
+    def assertRoundtrips(self, raw, members):
+        with zipfile_aes.AESZipFile(io.BytesIO(raw)) as zipfp:
+            zipfp.setpassword(self.pwd)
+            for name, data in members:
+                self.assertEqual(zipfp.read(name), data)
+        # testzip exercises the HMAC auth tail (and any AE-1 CRC) per member.
+        with zipfile_aes.AESZipFile(io.BytesIO(raw)) as zipfp:
+            zipfp.setpassword(self.pwd)
+            self.assertIsNone(zipfp.testzip())
+
+    def test_default_selection_is_ae2_for_all_member_sizes(self):
+        raw = self.build_archive({}, use_open=True)
+        self.assertHeadersDescribeOneFormat(
+            raw,
+            {name: zipfile_aes.WZ_AES_V2 for name in self.vectors},
+        )
+        self.assertRoundtrips(raw, list(self.vectors.items()))
+
+    def test_conditional_crc_unknown_size_freezes_ae2(self):
+        # Even members which would qualify for AE-1 must stay AE-2: the size
+        # is only known after the local header has already been emitted.
+        raw = self.build_archive(
+            {
+                'conditionally_include_crc': True,
+                'min_bytes_to_include_crc': self.min_bytes_to_include_crc,
+            },
+            use_open=True,
+        )
+        self.assertHeadersDescribeOneFormat(
+            raw,
+            {name: zipfile_aes.WZ_AES_V2 for name in self.vectors},
+        )
+        self.assertRoundtrips(raw, list(self.vectors.items()))
+
+    def test_conditional_crc_known_size_honours_boundary(self):
+        raw = self.build_archive(
+            {
+                'conditionally_include_crc': True,
+                'min_bytes_to_include_crc': self.min_bytes_to_include_crc,
+            },
+            use_open=False,
+        )
+        self.assertHeadersDescribeOneFormat(raw, {
+            'empty.bin': zipfile_aes.WZ_AES_V2,
+            'small.bin': zipfile_aes.WZ_AES_V2,
+            'boundary.bin': zipfile_aes.WZ_AES_V1,
+            'large.bin': zipfile_aes.WZ_AES_V1,
+        })
+        self.assertRoundtrips(raw, list(self.vectors.items()))
+
+    def test_forced_ae1_unknown_size_including_empty_member(self):
+        raw = self.build_archive(
+            {'force_wz_aes_version': zipfile_aes.WZ_AES_V1},
+            use_open=True,
+        )
+        self.assertHeadersDescribeOneFormat(
+            raw,
+            {name: zipfile_aes.WZ_AES_V1 for name in self.vectors},
+        )
+        self.assertRoundtrips(raw, list(self.vectors.items()))
+
+    def test_forced_ae2(self):
+        raw = self.build_archive(
+            {'force_wz_aes_version': zipfile_aes.WZ_AES_V2},
+            use_open=True,
+        )
+        self.assertHeadersDescribeOneFormat(
+            raw,
+            {name: zipfile_aes.WZ_AES_V2 for name in self.vectors},
+        )
+        self.assertRoundtrips(raw, list(self.vectors.items()))
+
+    def test_bzip2_stays_ae2_even_above_crc_threshold(self):
+        data = self.vectors['large.bin']
+        raw = self.build_archive(
+            {
+                'conditionally_include_crc': True,
+                'min_bytes_to_include_crc': self.min_bytes_to_include_crc,
+            },
+            use_open=False,
+            compression=zipfile.ZIP_BZIP2,
+            members=[('bz.bin', data)],
+        )
+        self.assertHeadersDescribeOneFormat(
+            raw, {'bz.bin': zipfile_aes.WZ_AES_V2})
+        self.assertRoundtrips(raw, [('bz.bin', data)])
+
+    def test_local_header_version_is_final_while_member_still_streams(self):
+        # Intercept the bytes while a large, unknown-size member is still being
+        # written. The version committed in the first local header must
+        # already be final and must not change in the completed archive.
+        captured = {}
+
+        class ProbeStream(_NonSeekableShortWrite):
+            def write(self, data):
+                count = super().write(data)
+                if self._offset >= 40 and 'version' not in captured:
+                    raw = self._sink.getvalue()
+                    header = struct.unpack(
+                        zipfile.structFileHeader,
+                        raw[:zipfile.sizeFileHeader],
+                    )
+                    name_len = header[zipfile._FH_FILENAME_LENGTH]
+                    extra_len = header[zipfile._FH_EXTRA_FIELD_LENGTH]
+                    extra = raw[zipfile.sizeFileHeader + name_len:
+                                zipfile.sizeFileHeader + name_len + extra_len]
+                    captured['version'] = _parse_aes_extra(extra)['version']
+                return count
+
+        sink = io.BytesIO()
+        data = b'x' * 5000
+        with zipfile_aes.AESZipFile(ProbeStream(sink), 'w') as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(
+                zipfile_aes.WZ_AES,
+                conditionally_include_crc=True,
+                min_bytes_to_include_crc=self.min_bytes_to_include_crc,
+            )
+            with zipfp.open('streamed.bin', 'w') as zfout:
+                for index in range(0, len(data), 37):
+                    zfout.write(data[index:index + 37])
+
+        self.assertEqual(captured['version'], zipfile_aes.WZ_AES_V2)
+        entries = _parse_archive(sink.getvalue())
+        entry = entries['streamed.bin']
+        self.assertEqual(entry['local']['aes']['version'],
+                         captured['version'])
+        self.assertEqual(entry['central']['aes']['version'],
+                         captured['version'])
+        self.assertEqual(entry['central']['crc'], 0)
+        self.assertEqual(entry['dd']['crc'], 0)
+        self.assertRoundtrips(sink.getvalue(), [('streamed.bin', data)])
+
+    def test_forced_version_visible_while_member_still_streams(self):
+        captured = {}
+
+        class ProbeStream(_NonSeekableShortWrite):
+            def write(self, data):
+                count = super().write(data)
+                if self._offset >= 40 and 'version' not in captured:
+                    raw = self._sink.getvalue()
+                    header = struct.unpack(
+                        zipfile.structFileHeader,
+                        raw[:zipfile.sizeFileHeader],
+                    )
+                    name_len = header[zipfile._FH_FILENAME_LENGTH]
+                    extra_len = header[zipfile._FH_EXTRA_FIELD_LENGTH]
+                    extra = raw[zipfile.sizeFileHeader + name_len:
+                                zipfile.sizeFileHeader + name_len + extra_len]
+                    captured['version'] = _parse_aes_extra(extra)['version']
+                return count
+
+        sink = io.BytesIO()
+        with zipfile_aes.AESZipFile(ProbeStream(sink), 'w') as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(
+                zipfile_aes.WZ_AES,
+                force_wz_aes_version=zipfile_aes.WZ_AES_V1,
+            )
+            with zipfp.open('forced.bin', 'w') as zfout:
+                zfout.write(b'y' * 300)
+
+        self.assertEqual(captured['version'], zipfile_aes.WZ_AES_V1)
+        entries = _parse_archive(sink.getvalue())
+        self.assertEqual(entries['forced.bin']['local']['aes']['version'], 1)
+        self.assertEqual(entries['forced.bin']['central']['aes']['version'], 1)
+
+    def test_large_member_is_streamed_not_buffered(self):
+        # The largest single sink write stays bounded regardless of member
+        # size, proving the member is not accumulated before being emitted.
+        max_write_seen = 0
+
+        class TrackingSink:
+            def write(self, data):
+                nonlocal max_write_seen
+                max_write_seen = max(max_write_seen, len(data))
+                self.buffer = getattr(self, 'buffer', bytearray())
+                self.buffer.extend(data)
+                return len(data)
+
+            def flush(self):
+                pass
+
+        tracking_sink = TrackingSink()
+        data = b'abcdefgh' * (1 << 18)  # 2 MiB
+        with zipfile_aes.AESZipFile(
+                _NonSeekableShortWrite(tracking_sink, max_write=1024),
+                'w') as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(zipfile_aes.WZ_AES)
+            with zipfp.open('huge.bin', 'w') as zfout:
+                for index in range(0, len(data), 4096):
+                    zfout.write(data[index:index + 4096])
+
+        self.assertLessEqual(max_write_seen, 1024)
+        with zipfile_aes.AESZipFile(
+                io.BytesIO(bytes(tracking_sink.buffer))) as zipfp:
+            zipfp.setpassword(self.pwd)
+            self.assertEqual(zipfp.read('huge.bin'), data)
+
+    def test_finalize_rejects_version_drift_on_unseekable_stream(self):
+        encrypter = zipfile_aes.AESZipEncrypter(self.pwd)
+        zinfo = zipfile_aes.AESZipInfo('drift.bin')
+        zinfo.compress_type = zipfile.ZIP_STORED
+        zinfo.file_size = 0
+        encrypter.update_zipinfo(zinfo, seekable=False)
+        frozen = zinfo.wz_aes_version
+        zinfo.wz_aes_version = (
+            zipfile_aes.WZ_AES_V1
+            if frozen == zipfile_aes.WZ_AES_V2
+            else zipfile_aes.WZ_AES_V2
+        )
+        with self.assertRaises(RuntimeError):
+            encrypter.finalize_zipinfo(zinfo, seekable=False)
+
+    def test_seekable_output_keeps_existing_recompute_behaviour(self):
+        # On seekable output the local header is rewritten at close, so an
+        # unknown-size member may still become AE-1 once its size is known.
+        sink = io.BytesIO()
+        with zipfile_aes.AESZipFile(sink, 'w') as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(
+                zipfile_aes.WZ_AES,
+                conditionally_include_crc=True,
+                min_bytes_to_include_crc=self.min_bytes_to_include_crc,
+            )
+            with zipfp.open('member.bin', 'w') as zfout:
+                zfout.write(b'a' * 100)
+
+        with zipfile_aes.AESZipFile(io.BytesIO(sink.getvalue())) as zipfp:
+            zipfp.setpassword(self.pwd)
+            zinfo = zipfp.getinfo('member.bin')
+            self.assertEqual(zinfo.wz_aes_version, zipfile_aes.WZ_AES_V1)
+            self.assertEqual(zinfo.CRC, zipfile.crc32(b'a' * 100))
+            self.assertEqual(zipfp.read('member.bin'), b'a' * 100)
+
+    def test_seekable_small_member_remains_ae2(self):
+        sink = io.BytesIO()
+        with zipfile_aes.AESZipFile(sink, 'w') as zipfp:
+            zipfp.setpassword(self.pwd)
+            zipfp.setencryption(
+                zipfile_aes.WZ_AES,
+                conditionally_include_crc=True,
+                min_bytes_to_include_crc=self.min_bytes_to_include_crc,
+            )
+            zipfp.writestr('small.bin', b'a' * 5)
+
+        with zipfile_aes.AESZipFile(io.BytesIO(sink.getvalue())) as zipfp:
+            zipfp.setpassword(self.pwd)
+            zinfo = zipfp.getinfo('small.bin')
+            self.assertEqual(zinfo.wz_aes_version, zipfile_aes.WZ_AES_V2)
+            self.assertEqual(zinfo.CRC, 0)
+
+
 @requires_pycrypto
 @requires_lzma
 class WZAESLZMATests(unittest.TestCase):
-
     def tearDown(self):
         try:
             unlink(TESTFN)
