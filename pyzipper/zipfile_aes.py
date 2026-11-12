@@ -355,6 +355,9 @@ class AESZipExtFile(ZipExtFile):
         encryption_header_length = AESZipDecrypter.encryption_header_length(
             self._zinfo)
         self.encryption_header = self._fileobj.read(encryption_header_length)
+        if self._budget is not None:
+            self._budget.add_compressed(
+                len(self.encryption_header), self.name)
         # Adjust read size for encrypted files since the start of the file
         # may be used for the encryption/password information.
         self._orig_compress_left -= encryption_header_length

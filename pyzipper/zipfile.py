@@ -36,7 +36,8 @@ except ImportError:
 
 __all__ = ["BadZipFile", "BadZipfile", "error",
            "ZIP_STORED", "ZIP_DEFLATED", "ZIP_BZIP2", "ZIP_LZMA",
-           "is_zipfile", "ZipInfo", "ZipFile", "PyZipFile", "LargeZipFile"]
+           "is_zipfile", "ZipInfo", "ZipFile", "PyZipFile", "LargeZipFile",
+           "ExtractionBudget", "ExtractionBudgetExceeded"]
 
 
 class BadZipFile(Exception):
@@ -48,6 +49,96 @@ class LargeZipFile(Exception):
     Raised when writing a zipfile, the zipfile requires ZIP64 extensions
     and those extensions are disabled.
     """
+
+
+class ExtractionBudgetExceeded(Exception):
+    """Raised when an ExtractionBudget limit is exceeded while reading.
+
+    This is deliberately not a subclass of BadZipFile: exceeding a budget
+    is a resource-limit decision about an untrusted archive, not a file
+    integrity or format failure (such as a bad HMAC). A member whose read
+    is aborted by the budget has not been fully verified.
+    """
+
+
+class ExtractionBudget:
+    """Cumulative resource budget for extracting one untrusted archive.
+
+    A budget instance is bound to a single archive processing pass: pass it
+    to the ZipFile (or AESZipFile) constructor via the ``extraction_budget``
+    keyword and it is shared by every member opened from that ZipFile,
+    including members read interleaved at the same time. Counters only ever
+    increase for the lifetime of the budget; reading in small chunks does
+    not reset any allowance.
+
+    Limits (None means unlimited):
+
+    max_compressed_bytes: total compressed bytes read from the archive
+        across all members.
+    max_decompressed_bytes: total bytes produced by the decompressors
+        across all members, measured at the decompressor output. The
+        central directory's declared file_size is not trusted.
+    max_members: number of members opened for reading.
+
+    Measured counters:
+
+    compressed_bytes_read, decompressed_bytes, members_opened and
+    peak_decompressed_chunk (the largest single decompressor output,
+    recorded at the decompressor output).
+    """
+
+    def __init__(self, max_compressed_bytes=None, max_decompressed_bytes=None,
+                 max_members=None):
+        for name, value in (
+            ('max_compressed_bytes', max_compressed_bytes),
+            ('max_decompressed_bytes', max_decompressed_bytes),
+            ('max_members', max_members),
+        ):
+            if value is not None and value < 0:
+                raise ValueError('%s must be non-negative or None' % name)
+        self.max_compressed_bytes = max_compressed_bytes
+        self.max_decompressed_bytes = max_decompressed_bytes
+        self.max_members = max_members
+
+        self.compressed_bytes_read = 0
+        self.decompressed_bytes = 0
+        self.peak_decompressed_chunk = 0
+        self.members_opened = 0
+
+    def check_member_open(self, name):
+        self.members_opened += 1
+        if (self.max_members is not None
+                and self.members_opened > self.max_members):
+            raise ExtractionBudgetExceeded(
+                "Member count budget exceeded while opening %r: "
+                "%d members opened, limit is %d"
+                % (name, self.members_opened, self.max_members))
+
+    def add_compressed(self, n, name):
+        if n <= 0:
+            return
+        self.compressed_bytes_read += n
+        if (self.max_compressed_bytes is not None
+                and self.compressed_bytes_read > self.max_compressed_bytes):
+            raise ExtractionBudgetExceeded(
+                "Compressed read budget exceeded while reading %r: "
+                "%d bytes read, limit is %d"
+                % (name, self.compressed_bytes_read,
+                   self.max_compressed_bytes))
+
+    def add_decompressed(self, n, name):
+        if n <= 0:
+            return
+        self.decompressed_bytes += n
+        if n > self.peak_decompressed_chunk:
+            self.peak_decompressed_chunk = n
+        if (self.max_decompressed_bytes is not None
+                and self.decompressed_bytes > self.max_decompressed_bytes):
+            raise ExtractionBudgetExceeded(
+                "Decompressed output budget exceeded while reading %r: "
+                "%d bytes produced, limit is %d"
+                % (name, self.decompressed_bytes,
+                   self.max_decompressed_bytes))
 
 
 error = BadZipfile = BadZipFile      # Pre-3.2 compatibility names
@@ -1163,11 +1254,14 @@ class ZipExtFile(io.BufferedIOBase):
     # Chunk size to read during seek
     MAX_SEEK_READ = 1 << 24
 
-    def __init__(self, fileobj, mode, zipinfo, close_fileobj=False, pwd=None):
+    def __init__(self, fileobj, mode, zipinfo, close_fileobj=False, pwd=None,
+                 budget=None):
         self._fileobj = fileobj
         self._zinfo = zipinfo
         self._close_fileobj = close_fileobj
         self._pwd = pwd
+        # Shared ExtractionBudget for the whole archive, or None.
+        self._budget = budget
 
         self.process_local_header()
         self.raise_for_unsupported_flags()
@@ -1286,6 +1380,9 @@ class ZipExtFile(io.BufferedIOBase):
 
         self.encryption_header = self._fileobj.read(
             CRCZipDecrypter.encryption_header_length)
+        if self._budget is not None:
+            self._budget.add_compressed(
+                len(self.encryption_header), self.name)
         # Adjust read size for encrypted files since the start of the file
         # may be used for the encryption/password information.
         self._orig_compress_left -= CRCZipDecrypter.encryption_header_length
@@ -1474,6 +1571,14 @@ class ZipExtFile(io.BufferedIOBase):
             data = self._decompressor.decompress(data)
             self._eof = self._decompressor.eof or self._compress_left <= 0
 
+        if self._budget is not None:
+            # Account the actual decompressor output against the budget
+            # before truncating to the central directory's declared
+            # file_size, which is not trusted. If the budget is exceeded
+            # this raises before _eof is reached, so the member is never
+            # marked as fully verified (no CRC/HMAC check is skipped to).
+            self._budget.add_decompressed(len(data), self.name)
+
         data = data[:self._left]
         self._left -= len(data)
         if self._left <= 0:
@@ -1494,6 +1599,9 @@ class ZipExtFile(io.BufferedIOBase):
         self._compress_left -= len(data)
         if not data:
             raise EOFError
+
+        if self._budget is not None:
+            self._budget.add_compressed(len(data), self.name)
 
         if self._decrypter is not None:
             data = self._decrypter.decrypt(data)
@@ -1691,7 +1799,8 @@ class ZipFile:
     zipwritefile_cls = _ZipWriteFile
 
     def __init__(self, file, mode="r", compression=ZIP_STORED, allowZip64=True,
-                 compresslevel=None, *, strict_timestamps=True):
+                 compresslevel=None, *, strict_timestamps=True,
+                 extraction_budget=None):
         """Open the ZIP file with mode read 'r', write 'w', exclusive create
         'x', or append 'a'."""
         if mode not in ('r', 'w', 'x', 'a'):
@@ -1712,6 +1821,14 @@ class ZipFile:
         self.encryption_kwargs = None
         self._comment = b''
         self._strict_timestamps = strict_timestamps
+        # Optional ExtractionBudget shared by all members read from this
+        # archive during this processing pass.
+        if (extraction_budget is not None
+                and not isinstance(extraction_budget, ExtractionBudget)):
+            raise TypeError(
+                "extraction_budget: expected ExtractionBudget, got %s"
+                % type(extraction_budget).__name__)
+        self.extraction_budget = extraction_budget
 
         # Check if we were passed a file-like object
         # os.PathLike and os.fspath were added in python 3.6
@@ -2016,11 +2133,15 @@ class ZipFile:
 
     def _open_to_read(self, mode, zinfo, pwd):
         # Open for reading:
+        if self.extraction_budget is not None:
+            self.extraction_budget.check_member_open(zinfo.filename)
         self._fileRefCnt += 1
         zef_file = _SharedFile(self.fp, zinfo.header_offset,
                                self._fpclose, self._lock, lambda: self._writing)
         try:
-            return self.zipextfile_cls(zef_file, mode, zinfo, True, pwd)
+            return self.zipextfile_cls(
+                zef_file, mode, zinfo, True, pwd,
+                budget=self.extraction_budget)
         except Exception as e:
             zef_file.close()
             raise e
