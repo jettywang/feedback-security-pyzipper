@@ -1,9 +1,12 @@
+import collections
+import hashlib
 import io
 import os
 import struct
 import time
 import unittest
 from random import randint, random
+from unittest import mock
 
 from test.support import unlink
 from .test_zipfile import (
@@ -1235,6 +1238,825 @@ class LzmaTestZip64InSmallFiles(AbstractTestZip64InSmallFiles,
     encryption = zipfile_aes.WZ_AES
     encryption_kwargs = {'nbits': 128}
     pwd = b'this is a test password'
+
+
+# ---------------------------------------------------------------------------
+# Fixed repository vectors.
+#
+# These are the same archives used by WZAESKnownFileTests above, restated so
+# the integrity matrix can reason about their exact byte layout.  The four
+# vectors share the local header, filename and AES extra field; only the
+# local/central CRC fields and the AES vendor version differ.
+#
+# Offsets in each 203-byte archive:
+#
+#   0..13    local file header
+#   14..17   local CRC
+#   18..25   compressed size / uncompressed size
+#   26..    filename and AES extra field (0x9901, data length 7)
+#   49..64   salt (16 bytes, AES-256 => strength 3)
+#   65..66   password verification value
+#   67..105  AES-CTR protected compressed data (39 bytes)
+#   106..115 HMAC-SHA1 authentication tail (first 10 bytes)
+#   116..    central directory (central CRC at 132..135)
+# ---------------------------------------------------------------------------
+
+KNOWN_AE1 = (
+    b'PK\x03\x04\x14\x00\x01\x00c\x00\x00\x00!\x00&[<ZC\x00\x00\x00\'\x00\x00'
+    b'\x00\x08\x00\x0b\x00test.txt\x01\x99\x07\x00\x01\x00AE\x03\x00\x00\xe5G'
+    b'\xf2Z"[\xd0\xce\x96\xb7\xb3\xf6\x85\x8f|\x05\xa9\xdaBGz:!\xde\xa6\x9a\xb7'
+    b'\x81A\x8e\x82\xfd)6|\x84\xf93\x0ecU\xa7\x07v\xe19\x18A\x94GmQ\xc5Y\x12'
+    b'\xb0\x05=\xbb\xd2\x9bi\x873\xb9\xbd\xf1PK\x01\x02\x14\x03\x14\x00\x01\x00'
+    b'c\x00\x00\x00!\x00&[<ZC\x00\x00\x00\'\x00\x00\x00\x08\x00\x0b\x00\x00\x00'
+    b'\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00test.txt\x01\x99\x07\x00'
+    b'\x01\x00AE\x03\x00\x00PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00A\x00\x00'
+    b'\x00t\x00\x00\x00\x00\x00'
+)
+
+KNOWN_AE2_ZERO_CRC = (
+    b'PK\x03\x04\x14\x00\x01\x00c\x00\x00\x00!\x00\x00\x00\x00\x00C\x00\x00\x00'
+    b'\'\x00\x00\x00\x08\x00\x0b\x00test.txt\x01\x99\x07\x00\x02\x00AE\x03\x00'
+    b'\x00\xe5G\xf2Z"[\xd0\xce\x96\xb7\xb3\xf6\x85\x8f|\x05\xa9\xdaBGz:!\xde'
+    b'\xa6\x9a\xb7\x81A\x8e\x82\xfd)6|\x84\xf93\x0ecU\xa7\x07v\xe19\x18A\x94GmQ'
+    b'\xc5Y\x12\xb0\x05=\xbb\xd2\x9bi\x873\xb9\xbd\xf1PK\x01\x02\x14\x03\x14'
+    b'\x00\x01\x00c\x00\x00\x00!\x00\x00\x00\x00\x00C\x00\x00\x00\'\x00\x00\x00'
+    b'\x08\x00\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00t'
+    b'est.txt\x01\x99\x07\x00\x02\x00AE\x03\x00\x00PK\x05\x06\x00\x00\x00\x00'
+    b'\x01\x00\x01\x00A\x00\x00\x00t\x00\x00\x00\x00\x00'
+)
+
+KNOWN_AE1_BAD_CRC = (
+    b'PK\x03\x04\x14\x00\x01\x00c\x00\x00\x00!\x00&[<0C\x00\x00\x00\'\x00\x00'
+    b'\x00\x08\x00\x0b\x00test.txt\x01\x99\x07\x00\x01\x00AE\x03\x00\x00\xe5G'
+    b'\xf2Z"[\xd0\xce\x96\xb7\xb3\xf6\x85\x8f|\x05\xa9\xdaBGz:!\xde\xa6\x9a\xb7'
+    b'\x81A\x8e\x82\xfd)6|\x84\xf93\x0ecU\xa7\x07v\xe19\x18A\x94GmQ\xc5Y\x12'
+    b'\xb0\x05=\xbb\xd2\x9bi\x873\xb9\xbd\xf1PK\x01\x02\x14\x03\x14\x00\x01\x00'
+    b'c\x00\x00\x00!\x00&[<0C\x00\x00\x00\'\x00\x00\x00\x08\x00\x0b\x00\x00\x00'
+    b'\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00test.txt\x01\x99\x07\x00'
+    b'\x01\x00AE\x03\x00\x00PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00A\x00\x00'
+    b'\x00t\x00\x00\x00\x00\x00'
+)
+
+KNOWN_AE2_BAD_CRC = (
+    b'PK\x03\x04\x14\x00\x01\x00c\x00\x00\x00!\x00&[<0C\x00\x00\x00\'\x00\x00'
+    b'\x00\x08\x00\x0b\x00test.txt\x01\x99\x07\x00\x02\x00AE\x03\x00\x00\xe5G'
+    b'\xf2Z"[\xd0\xce\x96\xb7\xb3\xf6\x85\x8f|\x05\xa9\xdaBGz:!\xde\xa6\x9a\xb7'
+    b'\x81A\x8e\x82\xfd)6|\x84\xf93\x0ecU\xa7\x07v\xe19\x18A\x94GmQ\xc5Y\x12'
+    b'\xb0\x05=\xbb\xd2\x9bi\x873\xb9\xbd\xf1PK\x01\x02\x14\x03\x14\x00\x01\x00'
+    b'c\x00\x00\x00!\x00&[<0C\x00\x00\x00\'\x00\x00\x00\x08\x00\x0b\x00\x00\x00'
+    b'\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00test.txt\x01\x99\x07\x00'
+    b'\x02\x00AE\x03\x00\x00PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00A\x00\x00'
+    b'\x00t\x00\x00\x00\x00\x00'
+)
+
+KNOWN_PASSWORD = b'test'
+KNOWN_NAME = 'test.txt'
+KNOWN_CONTENT = b'This is a test file for AES encryption.'
+KNOWN_VECTOR_SHA256 = {
+    'ae1': '956a34978654de9afda1f6f8cb835299cdcf3fce5c90c26ea0192f30cb4b513b',
+    'ae2-zero-crc': 'a3b5a79241d3f142f04c850f119fafb05f72c07928ee416a55d29d8f795dc2b7',
+    'ae1-bad-crc': 'eef5737f14e9f629509003443c0caa9475283f430baebcafa49f3136dfb082bd',
+    'ae2-bad-crc': '422ee591335a4171b62a8bc56ab03a14a9b3d9647611c9930b59a6073c30c942',
+}
+
+FIXED_LOCAL_CRC = 14
+FIXED_SALT = 49
+FIXED_PWD_VERIFY = 65
+FIXED_CIPHERTEXT = 67
+FIXED_HMAC = 106
+FIXED_CENTRAL_CRC = 132
+FIXED_CENTRAL_DIRECTORY = 116
+FIXED_CIPHERTEXT_LENGTH = 39
+HMAC_SIZE = 10
+
+
+# ---------------------------------------------------------------------------
+# Probing helpers.
+# ---------------------------------------------------------------------------
+
+Probe = collections.namedtuple(
+    'Probe', 'stage exception exception_type message output')
+
+STAGE_PASSWORD_CHECK = 'password-check'
+STAGE_HEADER_CHECK = 'header-check'
+STAGE_DECOMPRESSION = 'decompressor'
+STAGE_HMAC_CHECK = 'hmac-check'
+STAGE_CRC_CHECK = 'crc-check'
+STAGE_ACCEPTED = 'accepted'
+STAGE_OTHER = 'other'
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _xor(data, offset, mask=1):
+    mutated = bytearray(data)
+    mutated[offset] ^= mask
+    return bytes(mutated)
+
+
+def _put_u32(data, offset, value):
+    mutated = bytearray(data)
+    mutated[offset:offset + 4] = struct.pack('<L', value)
+    return bytes(mutated)
+
+
+def _failure_stage(exc):
+    """Classify an exception by the integrity responsibility that raised it."""
+    message = str(exc)
+    if isinstance(exc, RuntimeError) and 'Bad password' in message:
+        return STAGE_PASSWORD_CHECK
+    if isinstance(exc, zipfile.BadZipFile):
+        if 'Bad HMAC check' in message:
+            return STAGE_HMAC_CHECK
+        if 'Bad CRC-32' in message:
+            return STAGE_CRC_CHECK
+        return STAGE_HEADER_CHECK
+    if zipfile.lzma is not None and isinstance(exc, zipfile.lzma.LZMAError):
+        return STAGE_DECOMPRESSION
+    if zipfile.zlib is not None and isinstance(exc, zipfile.zlib.error):
+        return STAGE_DECOMPRESSION
+    if isinstance(exc, OSError) and 'Invalid data stream' in message:
+        return STAGE_DECOMPRESSION
+    return STAGE_OTHER
+
+
+def _consume(fp, read_strategy):
+    """Read a member to its real end at the requested granularity.
+
+    Sizes 1, 7 and 3000 straddle the implementation's 4 KiB internal read
+    block (``MIN_READ_SIZE``); ``'read1(1)'`` exercises the separate
+    ``read1`` path.  Reading only part of the member never consumes the
+    authentication tail and is therefore not an integrity test.
+    """
+    if read_strategy == 'read()':
+        return fp.read()
+    if read_strategy == 'read1(1)':
+        chunks = []
+        while True:
+            block = fp.read1(1)
+            if not block:
+                break
+            chunks.append(block)
+        return b''.join(chunks)
+
+    chunks = []
+    while True:
+        block = fp.read(read_strategy)
+        if not block:
+            break
+        chunks.append(block)
+    return b''.join(chunks)
+
+
+def _probe(data, pwd, entry, read_strategy):
+    """Read an archive completely and record where integrity checking stopped."""
+    try:
+        with zipfile_aes.AESZipFile(io.BytesIO(data)) as zipfp:
+            zipfp.setpassword(pwd)
+            with zipfp.open(entry) as fp:
+                output = _consume(fp, read_strategy)
+        return Probe(STAGE_ACCEPTED, None, None, None, output)
+    except Exception as exc:  # noqa: BLE001 - the stage itself is the subject
+        return Probe(
+            _failure_stage(exc), exc, type(exc), str(exc), None)
+
+
+READ_STRATEGIES = ('read()', 1, 7, 3000, 'read1(1)')
+
+
+def _find_extra(data, extra_start, extra_length, xid):
+    """Return the absolute offset of an extra-field record or its data."""
+    position = extra_start
+    end = extra_start + extra_length
+    while position + 4 <= end:
+        field_id, field_length = struct.unpack(
+            '<HH', data[position:position + 4])
+        if field_id == xid:
+            return position, field_length
+        position += 4 + field_length
+    raise AssertionError('extra field 0x%04x not found' % xid)
+
+
+def _archive_layout(data, entry):
+    """Return the absolute offsets of all fields relevant to integrity."""
+    with zipfile_aes.AESZipFile(io.BytesIO(data)) as zipfp:
+        info = zipfp.getinfo(entry)
+
+    local = struct.unpack(
+        zipfile.structFileHeader,
+        data[info.header_offset:info.header_offset + zipfile.sizeFileHeader],
+    )
+    fname_length = local[zipfile._FH_FILENAME_LENGTH]
+    extra_length = local[zipfile._FH_EXTRA_FIELD_LENGTH]
+    extra_start = (
+        info.header_offset + zipfile.sizeFileHeader + fname_length
+    )
+    data_start = extra_start + extra_length
+    salt_length = zipfile_aes.WZ_SALT_LENGTHS[info.wz_aes_strength]
+    ciphertext_start = data_start + salt_length + 2
+    hmac_start = (
+        ciphertext_start + info.compress_size
+        - salt_length - 2 - zipfile_aes.AESZipDecrypter.hmac_size
+    )
+
+    end_record = zipfile._EndRecData(io.BytesIO(data))
+    central_offset = end_record[zipfile._ECD_OFFSET]
+    central = struct.unpack(
+        zipfile.structCentralDir,
+        data[central_offset:central_offset + zipfile.sizeCentralDir],
+    )
+    central_fname_length = central[zipfile._CD_FILENAME_LENGTH]
+    central_extra_length = central[zipfile._CD_EXTRA_FIELD_LENGTH]
+    central_extra_start = (
+        central_offset + zipfile.sizeCentralDir + central_fname_length
+    )
+
+    local_extra_record, _ = _find_extra(
+        data, extra_start, extra_length, zipfile_aes.EXTRA_WZ_AES)
+    central_extra_record, central_extra_field_length = _find_extra(
+        data, central_extra_start, central_extra_length, zipfile_aes.EXTRA_WZ_AES)
+
+    return {
+        'info': info,
+        'local_offset': info.header_offset,
+        'fname_length': fname_length,
+        'extra_start': extra_start,
+        'extra_length': extra_length,
+        'local_extra_record': local_extra_record,
+        'central_extra_record': central_extra_record,
+        'central_extra_field_length': central_extra_field_length,
+        'data_start': data_start,
+        'salt': data_start,
+        'salt_length': salt_length,
+        'pwd_verify': data_start + salt_length,
+        'ciphertext_start': ciphertext_start,
+        'hmac_start': hmac_start,
+        'local_crc': info.header_offset + struct.calcsize('<4s2B4H'),
+        'central_crc': central_offset + struct.calcsize('<4s4B4H'),
+        'central_offset': central_offset,
+    }
+
+
+def _write_local_archive(ctype, version, content,
+                         entry=KNOWN_NAME, pwd=KNOWN_PASSWORD):
+    """Create a small local archive and return its bytes and field offsets."""
+    buffer = io.BytesIO()
+    with zipfile_aes.AESZipFile(buffer, 'w', compression=ctype) as zipfp:
+        zipfp.setpassword(pwd)
+        zipfp.setencryption(
+            zipfile_aes.WZ_AES,
+            nbits=128,
+            force_wz_aes_version=version,
+        )
+        zipfp.writestr(entry, content)
+    data = buffer.getvalue()
+    return data, _archive_layout(data, entry)
+
+
+def _compression_cases():
+    """Compression methods available in the current environment."""
+    cases = [('stored', zipfile.ZIP_STORED)]
+    if zipfile.zlib is not None:
+        cases.append(('deflate', zipfile.ZIP_DEFLATED))
+    if zipfile.bz2 is not None:
+        cases.append(('bzip2', zipfile.ZIP_BZIP2))
+    if zipfile.lzma is not None:
+        cases.append(('lzma', zipfile.ZIP_LZMA))
+    return tuple(cases)
+
+
+MUTATION_CONTENT = b'integrity matrix payload:0123456789abcdef\n' * 4
+
+
+# Expected exception type and message fragment for stages that have a
+# documented library-level signal.  Keeping this table explicit means the
+# tests record *what* actually fired, not merely that "something failed".
+STAGE_EXCEPTION_SIGNATURES = {
+    STAGE_PASSWORD_CHECK: (RuntimeError, 'Bad password for file'),
+    STAGE_HMAC_CHECK: (zipfile.BadZipFile, 'Bad HMAC check for file'),
+    STAGE_CRC_CHECK: (zipfile.BadZipFile, 'Bad CRC-32 for file'),
+    STAGE_HEADER_CHECK: (zipfile.BadZipFile, None),
+}
+
+
+class _StageAssertions:
+    def assert_stage(self, probe, expected, message=''):
+        self.assertEqual(
+            probe.stage, expected,
+            msg='%sexpected %r, got %r (%s)' % (
+                message, expected, probe.stage,
+                probe.exception),
+        )
+        signature = STAGE_EXCEPTION_SIGNATURES.get(expected)
+        if signature is not None:
+            exception_type, fragment = signature
+            self.assertIsInstance(probe.exception, exception_type, msg=message)
+            if fragment is not None:
+                self.assertIn(fragment, probe.message, msg=message)
+
+
+@requires_pycrypto
+class WZAESFixedVectorIntegrityTests(_StageAssertions, unittest.TestCase):
+    """Fixed-vector ownership tests for password, HMAC and CRC checks."""
+
+    def test_vector_digests_are_stable(self):
+        """Guard the exact bytes this matrix reasons about."""
+        self.assertEqual(_sha256(KNOWN_AE1), KNOWN_VECTOR_SHA256['ae1'])
+        self.assertEqual(
+            _sha256(KNOWN_AE2_ZERO_CRC),
+            KNOWN_VECTOR_SHA256['ae2-zero-crc'],
+        )
+        self.assertEqual(
+            _sha256(KNOWN_AE1_BAD_CRC),
+            KNOWN_VECTOR_SHA256['ae1-bad-crc'],
+        )
+        self.assertEqual(
+            _sha256(KNOWN_AE2_BAD_CRC),
+            KNOWN_VECTOR_SHA256['ae2-bad-crc'],
+        )
+
+    def test_fixed_layout_matches_documented_offsets(self):
+        """The documented fixed offsets are the real archive offsets."""
+        for data, version in (
+            (KNOWN_AE1, zipfile_aes.WZ_AES_V1),
+            (KNOWN_AE2_ZERO_CRC, zipfile_aes.WZ_AES_V2),
+        ):
+            layout = _archive_layout(data, KNOWN_NAME)
+            self.assertEqual(layout['salt'], FIXED_SALT)
+            self.assertEqual(layout['salt_length'], 16)
+            self.assertEqual(layout['pwd_verify'], FIXED_PWD_VERIFY)
+            self.assertEqual(layout['ciphertext_start'], FIXED_CIPHERTEXT)
+            self.assertEqual(layout['hmac_start'], FIXED_HMAC)
+            self.assertEqual(layout['local_crc'], FIXED_LOCAL_CRC)
+            self.assertEqual(layout['central_offset'], FIXED_CENTRAL_DIRECTORY)
+            self.assertEqual(layout['central_crc'], FIXED_CENTRAL_CRC)
+            self.assertEqual(layout['info'].wz_aes_version, version)
+
+    def test_fixed_good_vectors_read_at_every_granularity(self):
+        """Legal AE-1 and AE-2 vectors still read completely."""
+        for data, version in (
+            (KNOWN_AE1, zipfile_aes.WZ_AES_V1),
+            (KNOWN_AE2_ZERO_CRC, zipfile_aes.WZ_AES_V2),
+        ):
+            for strategy in READ_STRATEGIES:
+                with self.subTest(version=version, read_strategy=strategy):
+                    probe = _probe(data, KNOWN_PASSWORD, KNOWN_NAME, strategy)
+                    self.assert_stage(probe, STAGE_ACCEPTED)
+                    self.assertEqual(probe.output, KNOWN_CONTENT)
+
+    def test_fixed_salt_and_password_verifier_enter_password_stage(self):
+        """Changing salt or the 2-byte verifier fails the password check."""
+        for base in (KNOWN_AE1, KNOWN_AE2_ZERO_CRC):
+            for label, offset in (
+                ('salt-first', FIXED_SALT),
+                ('salt-last', FIXED_SALT + 15),
+                ('pwd-verify-first', FIXED_PWD_VERIFY),
+                ('pwd-verify-last', FIXED_PWD_VERIFY + 1),
+            ):
+                for strategy in READ_STRATEGIES:
+                    with self.subTest(label=label, read_strategy=strategy):
+                        probe = _probe(
+                            _xor(base, offset), KNOWN_PASSWORD,
+                            KNOWN_NAME, strategy)
+                        self.assert_stage(
+                            probe, STAGE_PASSWORD_CHECK,
+                            message='%s/%s: ' % (label, strategy))
+                        self.assertIsNone(probe.output)
+
+    def test_fixed_ciphertext_is_covered_by_hmac(self):
+        """Every changed ciphertext byte is rejected by the HMAC check."""
+        for base in (KNOWN_AE1, KNOWN_AE2_ZERO_CRC):
+            for label, offset in (
+                ('first', FIXED_CIPHERTEXT),
+                ('middle', FIXED_CIPHERTEXT + FIXED_CIPHERTEXT_LENGTH // 2),
+                ('last', FIXED_HMAC - 1),
+            ):
+                for strategy in READ_STRATEGIES:
+                    with self.subTest(label=label, read_strategy=strategy):
+                        probe = _probe(
+                            _xor(base, offset), KNOWN_PASSWORD,
+                            KNOWN_NAME, strategy)
+                        self.assert_stage(probe, STAGE_HMAC_CHECK)
+                        self.assertIsNone(probe.output)
+
+    def test_fixed_exhaustive_ciphertext_coverage(self):
+        """No protected ciphertext byte can be changed without rejection."""
+        stages = collections.Counter()
+        for data in (KNOWN_AE1, KNOWN_AE2_ZERO_CRC):
+            for offset in range(FIXED_CIPHERTEXT, FIXED_HMAC):
+                probe = _probe(
+                    _xor(data, offset), KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+                stages[probe.stage] += 1
+                self.assertNotEqual(
+                    probe.stage, STAGE_ACCEPTED,
+                    msg='ciphertext byte at offset %d was accepted' % offset)
+                self.assertIsNone(probe.output)
+        self.assertEqual(stages[STAGE_HMAC_CHECK], 2 * FIXED_CIPHERTEXT_LENGTH)
+        self.assertEqual(stages[STAGE_ACCEPTED], 0)
+
+    def test_fixed_authentication_tail_is_checked(self):
+        """Changing the HMAC tail itself must reach the HMAC stage."""
+        for base in (KNOWN_AE1, KNOWN_AE2_ZERO_CRC):
+            for offset in (FIXED_HMAC, FIXED_HMAC + HMAC_SIZE - 1):
+                for strategy in READ_STRATEGIES:
+                    with self.subTest(offset=offset, read_strategy=strategy):
+                        probe = _probe(
+                            _xor(base, offset), KNOWN_PASSWORD,
+                            KNOWN_NAME, strategy)
+                        self.assert_stage(probe, STAGE_HMAC_CHECK)
+
+    def test_fixed_crc_accounting_differs_for_ae1_and_ae2(self):
+        """AE-1 rejects a bad central CRC; AE-2 zero CRC is not a mismatch.
+
+        The central-directory CRC is the value read by the library.  A
+        mutation of the local header CRC alone is ignored, which is asserted
+        here to pin down which field owns the CRC responsibility.
+        """
+        # AE-1, wrong central CRC with valid HMAC => CRC stage.
+        probe = _probe(
+            _put_u32(KNOWN_AE1, FIXED_CENTRAL_CRC, 0x5a3c5b26 ^ 1),
+            KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_CRC_CHECK)
+        self.assertIsNone(probe.output)
+
+        # AE-1, local CRC changed only => not consulted.
+        probe = _probe(
+            _xor(KNOWN_AE1, FIXED_LOCAL_CRC), KNOWN_PASSWORD,
+            KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_ACCEPTED)
+        self.assertEqual(probe.output, KNOWN_CONTENT)
+
+        # AE-2 with the spec-required zero CRC => accepted.
+        probe = _probe(
+            KNOWN_AE2_ZERO_CRC, KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_ACCEPTED)
+        self.assertEqual(probe.output, KNOWN_CONTENT)
+
+        # AE-2 with a correct non-zero central CRC => still accepted.
+        probe = _probe(
+            _put_u32(KNOWN_AE2_ZERO_CRC, FIXED_CENTRAL_CRC, 0x5a3c5b26),
+            KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_ACCEPTED)
+        self.assertEqual(probe.output, KNOWN_CONTENT)
+
+        # AE-2 with a wrong non-zero central CRC => CRC stage.
+        probe = _probe(
+            _put_u32(KNOWN_AE2_ZERO_CRC, FIXED_CENTRAL_CRC, 0x5a3c5b26 ^ 1),
+            KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_CRC_CHECK)
+
+    def test_fixed_bad_crc_vectors_reach_crc_stage(self):
+        """The repository's AE-1/AE-2 bad-CRC vectors fail at CRC, not HMAC."""
+        for data, version, label in (
+            (KNOWN_AE1_BAD_CRC, zipfile_aes.WZ_AES_V1, 'ae1-bad-crc'),
+            (KNOWN_AE2_BAD_CRC, zipfile_aes.WZ_AES_V2, 'ae2-bad-crc'),
+        ):
+            for strategy in READ_STRATEGIES:
+                with self.subTest(label=label, read_strategy=strategy):
+                    probe = _probe(
+                        data, KNOWN_PASSWORD, KNOWN_NAME, strategy)
+                    self.assert_stage(probe, STAGE_CRC_CHECK)
+                    self.assertIsNone(probe.output)
+
+    def test_fixed_stage_report_records_actual_check_and_exception(self):
+        """Record the actual gate and exception for each negative control.
+
+        This is intentionally data, not just pass/fail: a future debugging
+        session can see which library check fired for each corruption class.
+        """
+        report = {
+            'salt': _probe(
+                _xor(KNOWN_AE1, FIXED_SALT), KNOWN_PASSWORD,
+                KNOWN_NAME, 'read()'),
+            'pwd-verify': _probe(
+                _xor(KNOWN_AE1, FIXED_PWD_VERIFY), KNOWN_PASSWORD,
+                KNOWN_NAME, 'read()'),
+            'ciphertext': _probe(
+                _xor(KNOWN_AE1, FIXED_CIPHERTEXT), KNOWN_PASSWORD,
+                KNOWN_NAME, 'read()'),
+            'auth-tail': _probe(
+                _xor(KNOWN_AE2_ZERO_CRC, FIXED_HMAC), KNOWN_PASSWORD,
+                KNOWN_NAME, 'read()'),
+            'crc': _probe(
+                _put_u32(KNOWN_AE1, FIXED_CENTRAL_CRC, 0x5a3c5b26 ^ 1),
+                KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+        }
+        expected = {
+            'salt': (STAGE_PASSWORD_CHECK, RuntimeError,
+                     "Bad password for file 'test.txt'"),
+            'pwd-verify': (STAGE_PASSWORD_CHECK, RuntimeError,
+                           "Bad password for file 'test.txt'"),
+            'ciphertext': (STAGE_HMAC_CHECK, zipfile.BadZipFile,
+                           "Bad HMAC check for file 'test.txt'"),
+            'auth-tail': (STAGE_HMAC_CHECK, zipfile.BadZipFile,
+                          "Bad HMAC check for file 'test.txt'"),
+            'crc': (STAGE_CRC_CHECK, zipfile.BadZipFile,
+                    "Bad CRC-32 for file 'test.txt'"),
+        }
+        for label, probe in report.items():
+            with self.subTest(label=label, stage=probe.stage):
+                stage, exception_type, message = expected[label]
+                self.assert_stage(probe, stage)
+                self.assertIsInstance(probe.exception, exception_type)
+                self.assertEqual(probe.message, message)
+                self.assertIsNone(probe.output)
+
+    def test_fixed_zero_crc_cannot_bypass_hmac(self):
+        """AE-2 zero CRC must not turn a bad authentication tail into success."""
+        probe = _probe(
+            _xor(KNOWN_AE2_ZERO_CRC, FIXED_HMAC), KNOWN_PASSWORD,
+            KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_HMAC_CHECK)
+        self.assertIsNone(probe.output)
+
+    def test_fixed_stages_are_distributed_not_all_header_failures(self):
+        """The negative controls reach password, HMAC and CRC respectively."""
+        observed = {
+            _probe(_xor(KNOWN_AE1, FIXED_SALT), KNOWN_PASSWORD,
+                   KNOWN_NAME, 'read()').stage,
+            _probe(_xor(KNOWN_AE1, FIXED_CIPHERTEXT), KNOWN_PASSWORD,
+                   KNOWN_NAME, 'read()').stage,
+            _probe(_put_u32(KNOWN_AE1, FIXED_CENTRAL_CRC, 0x5a3c5b26 ^ 1),
+                   KNOWN_PASSWORD, KNOWN_NAME, 'read()').stage,
+        }
+        self.assertEqual(observed, {
+            STAGE_PASSWORD_CHECK,
+            STAGE_HMAC_CHECK,
+            STAGE_CRC_CHECK,
+        })
+
+
+@requires_pycrypto
+class WZAESMutationMatrixTests(_StageAssertions, unittest.TestCase):
+    """Mutation matrix over locally generated small AE-1/AE-2 archives."""
+
+    CONTENT = MUTATION_CONTENT
+
+    def mutations(self, data, layout, version):
+        ciphertext_length = layout['hmac_start'] - layout['ciphertext_start']
+        shared = (
+            ('salt', _xor(data, layout['salt']),
+             STAGE_PASSWORD_CHECK, ()),
+            ('pwd-verify', _xor(data, layout['pwd_verify']),
+             STAGE_PASSWORD_CHECK, ()),
+            ('ciphertext-first', _xor(data, layout['ciphertext_start']),
+             STAGE_HMAC_CHECK, (STAGE_DECOMPRESSION,)),
+            ('ciphertext-middle',
+             _xor(data, layout['ciphertext_start'] + ciphertext_length // 2),
+             STAGE_HMAC_CHECK, (STAGE_DECOMPRESSION,)),
+            ('ciphertext-last', _xor(data, layout['hmac_start'] - 1),
+             STAGE_HMAC_CHECK, (STAGE_DECOMPRESSION,)),
+            ('auth-tail-first', _xor(data, layout['hmac_start']),
+             STAGE_HMAC_CHECK, ()),
+            ('auth-tail-last', _xor(data, layout['hmac_start'] + 9),
+             STAGE_HMAC_CHECK, ()),
+            ('crc-central-bad',
+             _put_u32(data, layout['central_crc'], 0x5a3c5b26 ^ 1),
+             STAGE_CRC_CHECK, ()),
+            ('crc-local-only', _xor(data, layout['local_crc']),
+             STAGE_ACCEPTED, ()),
+        )
+        expected_crc = layout['info'].CRC
+        if version == zipfile_aes.WZ_AES_V1:
+            # AE-1 carries the real CRC; both copies are part of the header.
+            self.assertNotEqual(expected_crc, 0)
+        else:
+            # AE-2 carries zero CRC by default and must still verify HMAC.
+            self.assertEqual(expected_crc, 0)
+        return shared
+
+    def test_matrix_stages_and_outputs(self):
+        for compression, ctype in _compression_cases():
+            for version in (zipfile_aes.WZ_AES_V1, zipfile_aes.WZ_AES_V2):
+                data, layout = _write_local_archive(ctype, version, self.CONTENT)
+                for mutation, mutated, expected, early_stages in self.mutations(
+                        data, layout, version):
+                    for strategy in READ_STRATEGIES:
+                        with self.subTest(
+                                compression=compression, version=version,
+                                mutation=mutation, read_strategy=strategy):
+                            probe = _probe(
+                                mutated, KNOWN_PASSWORD, KNOWN_NAME, strategy)
+                            allowed = {expected}
+                            allowed.update(early_stages)
+                            self.assertIn(
+                                probe.stage, allowed,
+                                msg='%s/version=%s/%s/%s -> %s (%s)'
+                                    % (compression, version, mutation,
+                                       strategy, probe.stage,
+                                       probe.exception),
+                            )
+                            if expected == STAGE_ACCEPTED:
+                                self.assertIsNone(probe.exception)
+                                self.assertEqual(probe.output, self.CONTENT)
+                            else:
+                                self.assertIsNone(probe.output)
+                                self.assertIsNotNone(probe.exception)
+                                self.assert_stage(probe, probe.stage)
+
+    def test_every_ciphertext_byte_is_rejected_for_every_compression(self):
+        """Exhaustive byte sweep: no protected mutation is silently accepted."""
+        for compression, ctype in _compression_cases():
+            for version in (zipfile_aes.WZ_AES_V1, zipfile_aes.WZ_AES_V2):
+                data, layout = _write_local_archive(ctype, version, self.CONTENT)
+                accepted = []
+                stages = collections.Counter()
+                for offset in range(layout['ciphertext_start'], layout['hmac_start']):
+                    probe = _probe(
+                        _xor(data, offset), KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+                    stages[probe.stage] += 1
+                    if probe.stage == STAGE_ACCEPTED:
+                        accepted.append(offset)
+                with self.subTest(compression=compression, version=version):
+                    self.assertEqual(accepted, [])
+                    self.assertEqual(stages[STAGE_OTHER], 0)
+                    self.assertGreater(sum(stages.values()), 0)
+                    # Record that only the expected responsibilities fire.
+                    self.assertLessEqual(
+                        set(stages), {STAGE_HMAC_CHECK, STAGE_DECOMPRESSION})
+                    if compression == 'stored':
+                        # No inflater exists, so HMAC is the only possible gate.
+                        self.assertEqual(set(stages), {STAGE_HMAC_CHECK})
+                    else:
+                        # Compressed streams can be rejected by the inflater
+                        # before the HMAC gate; both stages must be exercised.
+                        self.assertIn(STAGE_HMAC_CHECK, stages)
+                        self.assertIn(STAGE_DECOMPRESSION, stages)
+
+    def test_ae2_zero_crc_is_accepted_but_bad_crc_is_not(self):
+        """AE-2's zero CRC must not short-circuit the CRC responsibility.
+
+        Both cases carry a valid HMAC.  The zero-CRC member is accepted; the
+        member whose supplied CRC does not match the plaintext must fail at
+        the CRC stage.  A reader that treated "CRC == 0" as "skip all
+        integrity" would wrongly accept the second member.
+        """
+        real_crc = zipfile.crc32(self.CONTENT)
+        for compression, ctype in _compression_cases():
+            for supplied_crc, expected in (
+                (0, STAGE_ACCEPTED),
+                (real_crc, STAGE_ACCEPTED),
+                (real_crc ^ 1, STAGE_CRC_CHECK),
+            ):
+                data, layout = _write_local_archive(
+                    ctype, zipfile_aes.WZ_AES_V2, self.CONTENT)
+                if supplied_crc != 0:
+                    data = _put_u32(data, layout['central_crc'], supplied_crc)
+                for strategy in READ_STRATEGIES:
+                    with self.subTest(
+                            compression=compression, supplied_crc=supplied_crc,
+                            read_strategy=strategy):
+                        probe = _probe(
+                            data, KNOWN_PASSWORD, KNOWN_NAME, strategy)
+                        self.assert_stage(probe, expected)
+                        if expected == STAGE_ACCEPTED:
+                            self.assertEqual(probe.output, self.CONTENT)
+                        else:
+                            self.assertIsNone(probe.output)
+
+    def test_stored_ciphertext_always_reaches_hmac(self):
+        """For stored members HMAC is the only gate that can reject."""
+        for version in (zipfile_aes.WZ_AES_V1, zipfile_aes.WZ_AES_V2):
+            data, layout = _write_local_archive(
+                zipfile.ZIP_STORED, version, self.CONTENT)
+            for strategy in ('read()', 'read1(1)'):
+                stages = collections.Counter()
+                for offset in range(layout['ciphertext_start'], layout['hmac_start']):
+                    probe = _probe(
+                        _xor(data, offset), KNOWN_PASSWORD,
+                        KNOWN_NAME, strategy)
+                    stages[probe.stage] += 1
+                with self.subTest(version=version, read_strategy=strategy):
+                    self.assertEqual(
+                        stages[STAGE_HMAC_CHECK],
+                        layout['hmac_start'] - layout['ciphertext_start'])
+
+    def test_deflate_ciphertext_mutations_are_never_accepted(self):
+        """Deflate may fail in zlib first, but a mutation is never accepted."""
+        if zipfile.zlib is None:
+            self.skipTest('requires zlib')
+        data, layout = _write_local_archive(
+            zipfile.ZIP_DEFLATED, zipfile_aes.WZ_AES_V1, self.CONTENT)
+        stages = collections.Counter()
+        for offset in range(layout['ciphertext_start'], layout['hmac_start']):
+            probe = _probe(
+                _xor(data, offset), KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+            stages[probe.stage] += 1
+            self.assertNotEqual(probe.stage, STAGE_ACCEPTED)
+        self.assertIn(STAGE_DECOMPRESSION, stages)
+        self.assertIn(STAGE_HMAC_CHECK, stages)
+
+
+@requires_pycrypto
+class WZAESAuthenticationSkipMutantTests(_StageAssertions, unittest.TestCase):
+    """Mutation tests for the matrix itself.
+
+    The mutant removes the authentication-tail comparison.  These assertions
+    prove the matrix observes the HMAC gate rather than passing because an
+    earlier parser stage happened to fail.
+    """
+
+    def test_skip_hmac_mutant_is_detected(self):
+        self.assert_stage(
+            _probe(KNOWN_AE1, KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+            STAGE_ACCEPTED)
+        self.assert_stage(
+            _probe(KNOWN_AE2_ZERO_CRC, KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+            STAGE_ACCEPTED)
+
+        data, layout = _write_local_archive(
+            zipfile.ZIP_STORED, zipfile_aes.WZ_AES_V2, MUTATION_CONTENT)
+        bad_tail = _xor(KNOWN_AE2_ZERO_CRC, FIXED_HMAC)
+        bad_ciphertext = _xor(data, layout['ciphertext_start'])
+
+        def skip_hmac_check(self, hmac_check):
+            return None
+
+        with mock.patch.object(
+                zipfile_aes.AESZipDecrypter, 'check_hmac', skip_hmac_check):
+            # Valid vectors remain readable, confirming the patch is not a
+            # broad parse break.
+            self.assert_stage(
+                _probe(KNOWN_AE1, KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+                STAGE_ACCEPTED)
+
+            # The matrix inputs that must fail on HMAC now appear successful;
+            # a test suite that only checks "an exception was raised" would
+            # miss this, while the stage assertions above catch it.
+            tail_probe = _probe(
+                bad_tail, KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+            self.assert_stage(tail_probe, STAGE_ACCEPTED)
+            self.assertEqual(tail_probe.output, KNOWN_CONTENT)
+
+            # The matrix assertion itself now fails: this is the detection
+            # signal a future regression must preserve.
+            with self.assertRaises(AssertionError):
+                self.assert_stage(tail_probe, STAGE_HMAC_CHECK)
+
+            cipher_probe = _probe(
+                bad_ciphertext, KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+            self.assert_stage(cipher_probe, STAGE_ACCEPTED)
+            self.assertNotEqual(cipher_probe.output, MUTATION_CONTENT)
+            with self.assertRaises(AssertionError):
+                self.assert_stage(cipher_probe, STAGE_HMAC_CHECK)
+
+        # Outside the patch the inputs are rejected again, proving the
+        # mutant was scoped correctly and the real gate is restored.
+        self.assert_stage(
+            _probe(bad_tail, KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+            STAGE_HMAC_CHECK)
+        self.assert_stage(
+            _probe(bad_ciphertext, KNOWN_PASSWORD, KNOWN_NAME, 'read()'),
+            STAGE_HMAC_CHECK)
+
+        # With AE-1 the CRC remains a second line of defence: disabling only
+        # HMAC does not make a changed ciphertext acceptable.
+        ae1_data, ae1_layout = _write_local_archive(
+            zipfile.ZIP_STORED, zipfile_aes.WZ_AES_V1, MUTATION_CONTENT)
+        ae1_bad_ciphertext = _xor(ae1_data, ae1_layout['ciphertext_start'])
+        with mock.patch.object(
+                zipfile_aes.AESZipDecrypter, 'check_hmac', skip_hmac_check):
+            ae1_probe = _probe(
+                ae1_bad_ciphertext, KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+            self.assert_stage(ae1_probe, STAGE_CRC_CHECK)
+            with self.assertRaises(AssertionError):
+                self.assert_stage(ae1_probe, STAGE_HMAC_CHECK)
+
+
+@requires_pycrypto
+class WZAESHeaderFailureStageTests(_StageAssertions, unittest.TestCase):
+    """Negative controls proving early parse failures stay distinguishable.
+
+    These inputs are deliberately broken before any AES integrity check.  The
+    point is that the matrix can tell a real header failure apart from a
+    password/HMAC/CRC failure instead of treating every exception as a pass.
+    """
+
+    def test_local_filename_mismatch_is_header_stage(self):
+        data, layout = _write_local_archive(
+            zipfile.ZIP_STORED, zipfile_aes.WZ_AES_V1, MUTATION_CONTENT)
+        filename_offset = (
+            layout['local_offset'] + zipfile.sizeFileHeader
+        )
+        probe = _probe(
+            _xor(data, filename_offset), KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_HEADER_CHECK)
+        self.assertIsNone(probe.output)
+
+    def test_corrupt_aes_extra_field_is_header_stage(self):
+        data, layout = _write_local_archive(
+            zipfile.ZIP_STORED, zipfile_aes.WZ_AES_V1, MUTATION_CONTENT)
+        # Shrink the AES extra-field data length from 7 to 6 in the central
+        # directory.  The AES extra decoder rejects the malformed record.
+        mutated = bytearray(data)
+        field_length_offset = layout['central_extra_record'] + 2
+        mutated[field_length_offset:field_length_offset + 2] = struct.pack(
+            '<H', layout['central_extra_field_length'] - 1)
+        probe = _probe(
+            bytes(mutated), KNOWN_PASSWORD, KNOWN_NAME, 'read()')
+        self.assert_stage(probe, STAGE_HEADER_CHECK)
 
 
 if __name__ == "__main__":
