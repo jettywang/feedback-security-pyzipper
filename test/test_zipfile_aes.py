@@ -798,6 +798,285 @@ class WZAESTests(unittest.TestCase):
 
 
 @requires_pycrypto
+class WZAESInterleavedMemberTests(unittest.TestCase):
+    """Read several AES members through one archive object, interleaved.
+
+    Each opened member owns its password snapshot, decrypter, HMAC state and
+    _SharedFile lease.  The fixed schedule below advances one member at a
+    time so that a password error, a default-password change or a rewind on
+    one member cannot move another member's keystream or authenticate it.
+    """
+
+    PWD1 = b'first interleaved password'
+    PWD2 = b'second interleaved password'
+    DATA = {
+        'alpha': b'ALPHA-001',
+        'beta': b'BETA-0022',
+        'gamma': b'GAMMA-03',
+    }
+    PASSWORDS = {
+        'alpha': PWD1,
+        'beta': PWD2,
+        'gamma': PWD1,
+    }
+    NAMES = {
+        'alpha': 'alpha.txt',
+        'beta': 'beta.txt',
+        'gamma': 'gamma.txt',
+    }
+    # Totals: alpha=9, beta=9, gamma=8.  gamma completes first, then alpha,
+    # then beta, so every member finishes while another is still open.
+    SCHEDULE = (
+        ('alpha', 2), ('beta', 3), ('gamma', 2),
+        ('alpha', 3), ('gamma', 3), ('beta', 2),
+        ('gamma', 3),
+        ('alpha', 2),
+        ('beta', 2),
+        ('alpha', 2),
+        ('beta', 2),
+    )
+
+    def tearDown(self):
+        try:
+            unlink(TESTFN)
+        except FileNotFoundError:
+            pass
+
+    def make_archive(self, target=TESTFN):
+        with zipfile_aes.AESZipFile(
+            target,
+            'w',
+            compression=zipfile.ZIP_STORED,
+            encryption=zipfile_aes.WZ_AES,
+            encryption_kwargs={'nbits': 128},
+        ) as zipfp:
+            for name in ('alpha', 'beta', 'gamma'):
+                zipfp.setpassword(self.PASSWORDS[name])
+                zipfp.writestr(self.NAMES[name], self.DATA[name])
+
+    def open_handles(self, zipfp):
+        handles = {}
+        for name in ('alpha', 'beta', 'gamma'):
+            handles[name] = zipfp.open(
+                self.NAMES[name], pwd=self.PASSWORDS[name])
+            handles[name].MIN_READ_SIZE = 2
+        return handles
+
+    def read_schedule(self, handles):
+        chunks = {name: [] for name in handles}
+        for name, size in self.SCHEDULE:
+            chunk = handles[name].read(size)
+            self.assertEqual(
+                len(chunk), size,
+                '%s: scheduled read of %d returned %d bytes'
+                % (name, size, len(chunk)))
+            chunks[name].append(chunk)
+        output = {}
+        for name, handle in handles.items():
+            output[name] = b''.join(chunks[name])
+            self.assertTrue(handle._eof, '%s did not reach EOF' % name)
+            self.assertEqual(handle.read(), b'')
+        return output
+
+    def member_hmacs(self, zipfp, name, pwd):
+        """Return the independent HMAC digest and the stored HMAC bytes."""
+        zinfo = zipfp.getinfo(self.NAMES[name])
+        with open(TESTFN, 'rb') as raw:
+            raw.seek(zinfo.header_offset)
+            fheader = raw.read(zipfile.sizeFileHeader)
+            fields = struct.unpack(zipfile.structFileHeader, fheader)
+            self.assertEqual(
+                fields[zipfile._FH_SIGNATURE], zipfile.stringFileHeader)
+            raw.read(fields[zipfile._FH_FILENAME_LENGTH])
+            raw.read(fields[zipfile._FH_EXTRA_FIELD_LENGTH])
+            header_len = zipfile_aes.AESZipDecrypter.encryption_header_length(
+                zinfo)
+            encryption_header = raw.read(header_len)
+            cipher_len = (
+                zinfo.compress_size
+                - header_len
+                - zipfile_aes.AESZipDecrypter.hmac_size
+            )
+            ciphertext = raw.read(cipher_len)
+            stored_hmac = raw.read(zipfile_aes.AESZipDecrypter.hmac_size)
+        self.assertEqual(len(ciphertext), cipher_len)
+        decrypter = zipfile_aes.AESZipDecrypter(zinfo, pwd, encryption_header)
+        decrypter.decrypt(ciphertext)
+        return decrypter.hmac.digest()[:decrypter.hmac_size], stored_hmac
+
+    def assert_hmac(self, handle, zipfp, name, pwd):
+        digest = handle._decrypter.hmac.digest()[:handle._decrypter.hmac_size]
+        expected, stored = self.member_hmacs(zipfp, name, pwd)
+        self.assertEqual(digest, expected)
+        self.assertEqual(stored, expected)
+        handle._decrypter.check_hmac(stored)
+
+    def member_state(self, handle):
+        return (
+            id(handle._decrypter),
+            handle._decrypter.hmac.digest(),
+            handle._compress_left,
+            handle._left,
+            handle._offset,
+            handle._readbuffer,
+            handle._fileobj._pos,
+            handle._eof,
+        )
+
+    def test_interleaved_passwords_and_default_password_snapshot(self):
+        """Explicit and default passwords are captured at open time."""
+        self.make_archive()
+        with zipfile_aes.AESZipFile(TESTFN, 'r') as zipfp:
+            zipfp.setpassword(self.PWD1)
+            alpha = zipfp.open(self.NAMES['alpha'], pwd=self.PWD1)
+            gamma = zipfp.open(self.NAMES['gamma'])
+            zipfp.setpassword(self.PWD2)
+            beta = zipfp.open(self.NAMES['beta'])
+            handles = {'alpha': alpha, 'beta': beta, 'gamma': gamma}
+            for handle in handles.values():
+                handle.MIN_READ_SIZE = 2
+
+            self.assertEqual(zipfp._fileRefCnt, 4)
+            self.assertEqual(alpha._pwd, self.PWD1)
+            self.assertEqual(gamma._pwd, self.PWD1)
+            self.assertEqual(beta._pwd, self.PWD2)
+            self.assertEqual(zipfp.pwd, self.PWD2)
+            self.assertEqual(len({id(h._decrypter) for h in handles.values()}),
+                             3)
+            self.assertEqual(len({id(h._fileobj) for h in handles.values()}),
+                             3)
+            self.assertEqual(len({id(h._fileobj._file)
+                                  for h in handles.values()}), 1)
+
+            try:
+                output = self.read_schedule(handles)
+                for name in ('alpha', 'beta', 'gamma'):
+                    self.assertEqual(output[name], self.DATA[name])
+
+                # Changing the default password only affects new opens.
+                # gamma and alpha remain bound to PWD1.
+                with self.assertRaisesRegex(RuntimeError, 'Bad password'):
+                    zipfp.read(self.NAMES['alpha'])
+                self.assertEqual(zipfp._fileRefCnt, 4)
+
+                for name, pwd in self.PASSWORDS.items():
+                    self.assert_hmac(handles[name], zipfp, name, pwd)
+                self.assertNotEqual(
+                    handles['alpha']._decrypter.hmac.digest(),
+                    handles['beta']._decrypter.hmac.digest())
+            finally:
+                for handle in handles.values():
+                    handle.close()
+
+            self.assertEqual(zipfp._fileRefCnt, 1)
+            self.assertFalse(zipfp.fp.closed)
+
+    def test_wrong_password_and_rewind_stay_member_local(self):
+        """A failure or rewind on one member leaves other members intact."""
+        self.make_archive()
+        with zipfile_aes.AESZipFile(TESTFN, 'r') as zipfp:
+            zipfp.setpassword(self.PWD1)
+            alpha = zipfp.open(self.NAMES['alpha'], pwd=self.PWD1)
+            beta = zipfp.open(self.NAMES['beta'], pwd=self.PWD2)
+            alpha.MIN_READ_SIZE = 2
+            beta.MIN_READ_SIZE = 2
+            try:
+                self.assertEqual(alpha.read(2), self.DATA['alpha'][:2])
+                self.assertEqual(beta.read(3), self.DATA['beta'][:3])
+                beta_decrypter = beta._decrypter
+                beta_state = self.member_state(beta)
+                alpha_decrypter = alpha._decrypter
+
+                # A member read with the wrong explicit password fails before
+                # any keystream or HMAC state is shared with open members.
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, 'Bad password'):
+                        zipfp.read(self.NAMES['gamma'], pwd=self.PWD2)
+                    self.assertEqual(zipfp._fileRefCnt, 3)
+                    self.assertEqual(self.member_state(beta), beta_state)
+                    self.assertIs(beta._decrypter, beta_decrypter)
+
+                # The same member still decrypts with its real password.
+                self.assertEqual(
+                    zipfp.read(self.NAMES['gamma'], pwd=self.PWD1),
+                    self.DATA['gamma'])
+                self.assertEqual(zipfp._fileRefCnt, 3)
+                self.assertEqual(self.member_state(beta), beta_state)
+                self.assertIs(beta._decrypter, beta_decrypter)
+
+                # Seeking back resets only alpha's decrypter and buffer.
+                alpha.seek(0)
+                self.assertEqual(alpha.tell(), 0)
+                self.assertIsNot(alpha._decrypter, alpha_decrypter)
+                self.assertEqual(self.member_state(beta), beta_state)
+                self.assertIs(beta._decrypter, beta_decrypter)
+
+                # Complete alpha while beta is only partially read.  alpha's
+                # successful HMAC must not validate beta.
+                self.assertEqual(alpha.read(), self.DATA['alpha'])
+                alpha_hmac, alpha_stored = self.member_hmacs(
+                    zipfp, 'alpha', self.PWD1)
+                self.assertEqual(
+                    alpha._decrypter.hmac.digest()[:10], alpha_hmac)
+                beta_partial = beta._decrypter.hmac.digest()[:10]
+                self.assertNotEqual(beta_partial, alpha_stored)
+                with self.assertRaises(zipfile_aes.BadZipFile):
+                    beta._decrypter.check_hmac(alpha_stored)
+                self.assertEqual(self.member_state(beta), beta_state)
+
+                # beta's own remaining bytes and HMAC are still correct.
+                self.assertEqual(beta.read(2), self.DATA['beta'][3:5])
+                self.assertEqual(beta.read(), self.DATA['beta'][5:])
+                self.assert_hmac(beta, zipfp, 'beta', self.PWD2)
+                beta_hmac, beta_stored = self.member_hmacs(
+                    zipfp, 'beta', self.PWD2)
+                self.assertEqual(beta_hmac, beta_stored)
+                self.assertNotEqual(beta_stored, alpha_stored)
+            finally:
+                alpha.close()
+                beta.close()
+            self.assertEqual(zipfp._fileRefCnt, 1)
+
+    def test_interleaved_handle_close_ownership(self):
+        """Closing member leases releases only that lease."""
+        self.make_archive()
+        with zipfile_aes.AESZipFile(TESTFN, 'r') as zipfp:
+            handles = self.open_handles(zipfp)
+            archive_fp = zipfp.fp
+            self.assertEqual(zipfp._fileRefCnt, 4)
+            self.assertEqual(len({id(h._fileobj) for h in handles.values()}),
+                             3)
+            for handle in handles.values():
+                self.assertIs(handle._fileobj._file, archive_fp)
+
+            for name in ('gamma', 'alpha', 'beta'):
+                handles[name].close()
+                self.assertEqual(zipfp._fileRefCnt,
+                                 3 - ('gamma', 'alpha', 'beta').index(name))
+                self.assertTrue(handles[name].closed)
+                self.assertIsNone(handles[name]._fileobj._file)
+                self.assertFalse(archive_fp.closed)
+            self.assertEqual(zipfp._fileRefCnt, 1)
+        self.assertTrue(archive_fp.closed)
+
+        # When the caller supplies the stream, closing handle leases and the
+        # archive itself must never close the caller's stream.
+        bio = io.BytesIO()
+        self.make_archive(bio)
+        zipfp = zipfile_aes.AESZipFile(bio, 'r')
+        handles = self.open_handles(zipfp)
+        try:
+            self.assertEqual(zipfp._fileRefCnt, 4)
+            for handle in handles.values():
+                handle.close()
+            self.assertEqual(zipfp._fileRefCnt, 1)
+            self.assertFalse(bio.closed)
+        finally:
+            zipfp.close()
+        self.assertFalse(bio.closed)
+
+
+@requires_pycrypto
 @requires_lzma
 class WZAESLZMATests(unittest.TestCase):
 
