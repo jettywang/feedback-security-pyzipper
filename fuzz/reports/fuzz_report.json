@@ -1,0 +1,979 @@
+{
+  "seed": 1592594996,
+  "iterations": 300,
+  "archive_bytes": 177,
+  "summary_counts": {
+    "ok": 107,
+    "clean-rejection": 135,
+    "unexpected": 93,
+    "oob": 29
+  },
+  "unexpected": [
+    {
+      "name": "dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#4:aes_len8_long+aes_len6_short+aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#8:unknown_declared_long+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#9:aes_extra_without_encrypted_flag+unknown_both_sides",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#10:dup_aes_divergent_lfh_cd+aes_extra_without_encrypted_flag+dup_aes_first_deflate",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#12:dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#16:aes_then_unknown+aes_actual_method_unknown_97+zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#22:aes_len8_long+aes_extra_without_encrypted_flag+aes_strength_invalid_9",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#25:zip64_csize_sentinel_tiny+cd_csize_crosses_central_dir+triple_aes",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#29:aes_len6_short+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#33:aes_bad_vendor+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#37:aes_extra_without_encrypted_flag+cd_csize_zero+cd_csize_zero",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#40:aes_then_zip64+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#43:dup_aes_divergent_lfh_cd+zip64_ln4_missing_q+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#45:cd_csize_below_aes_overhead+aes_actual_method_99_self+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#50:aes_extra_without_encrypted_flag+aes_then_zip64",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#63:dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#65:aes_then_zip64+zip64_csize_sentinel_tiny+lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#72:cd_csize_below_aes_overhead+zip64_csize_sentinel_huge+lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#75:lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#78:aes_header_truncated_body+aes_then_zip64+lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#79:aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#84:aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#86:aes_version_3+aes_len6_short+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#87:aes_bad_vendor+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#88:zip64_ln4_missing_q+dup_aes_last_deflate+lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#91:aes_extra_without_encrypted_flag+aes_then_unknown+aes_version_3",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#92:aes_bad_vendor+zip64_placeholder_no_extra+unknown_then_aes",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#93:zip64_csize_sentinel_tiny+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#94:aes_strength_invalid_9+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#98:aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#102:aes_strength_invalid_9+cd_usize_truncates_output",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#108:zip64_placeholder_no_extra+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#112:aes_then_zip64+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#125:dup_aes_first_deflate+aes_extra_without_encrypted_flag+zip64_csize_sentinel_tiny",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#135:zip64_declared8_body4+zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#140:aes_header_truncated_body+aes_strength_invalid_9+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#145:aes_version_3+aes_then_unknown+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#148:aes_extra_without_encrypted_flag+cd_usize_truncates_output",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#165:zip64_placeholder_no_extra+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#166:dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#169:aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#171:aes_len6_short+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#173:aes_strength_invalid_0+cd_csize_crosses_central_dir+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#175:aes_extra_without_encrypted_flag+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#182:zip64_declared24_body8+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#184:zip64_ln4_missing_q+zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#187:aes_extra_without_encrypted_flag+unknown_declared_long+zip64_csize_sentinel_huge",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#190:aes_bad_vendor+aes_actual_method_99_self+aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#192:aes_strength_invalid_0+zip64_placeholder_no_extra+dup_aes_first_deflate",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#194:aes_len6_short+aes_extra_without_encrypted_flag+dup_aes_first_deflate",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#195:dup_aes_divergent_lfh_cd+aes_extra_without_encrypted_flag+zip64_csize_sentinel_huge",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#200:aes_len6_short+aes_bad_vendor+aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#202:aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#210:aes_bad_vendor+aes_actual_method_99_self+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#212:triple_aes+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#213:zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#215:lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#218:triple_aes+zip64_placeholder_no_extra",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#221:unknown_both_sides+aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#223:aes_actual_method_99_self+zip64_then_aes+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#231:aes_extra_without_encrypted_flag",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#232:dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#234:unknown_both_sides+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#235:aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#237:dup_aes_divergent_lfh_cd+cd_usize_truncates_output",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#239:aes_bad_vendor+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#240:zip64_len0_with_sentinel+cd_csize_crosses_central_dir+dup_aes_bz2_lzma",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#241:dup_zip64+aes_strength_invalid_0",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "0"
+    },
+    {
+      "name": "random#242:dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#243:aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#246:aes_bad_vendor+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#249:aes_then_zip64+lfh_xlen_overruns+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#257:cd_csize_below_aes_overhead+zip64_placeholder_no_extra+unknown_both_sides",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#259:aes_then_unknown+aes_strength_invalid_0+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#262:dup_aes_last_deflate+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#263:cd_usize_truncates_output+aes_extra_without_encrypted_flag+unknown_both_sides",
+      "exc_type": "AttributeError",
+      "stage": "read",
+      "message": "'NoneType' object has no attribute 'hmac_size'"
+    },
+    {
+      "name": "random#265:unknown_then_aes+lfh_xlen_overruns",
+      "exc_type": "error",
+      "stage": "open",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#268:aes_then_unknown+dup_aes_divergent_lfh_cd+dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#282:dup_aes_last_deflate",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#283:dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#284:aes_len8_long+dup_aes_divergent_lfh_cd",
+      "exc_type": "error",
+      "stage": "read",
+      "message": "zlib/bz2/lzma decompressor error (message varies)"
+    },
+    {
+      "name": "random#286:zip64_declared8_body4+aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#287:zip64_csize_sentinel_tiny+dup_aes_bz2_lzma",
+      "exc_type": "EOFError",
+      "stage": "read",
+      "message": ""
+    },
+    {
+      "name": "random#289:unknown_then_aes+dup_zip64+lfh_xlen_overruns",
+      "exc_type": "IndexError",
+      "stage": "open",
+      "message": "index out of range"
+    },
+    {
+      "name": "random#290:aes_strength_invalid_9+cd_csize_zero",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    },
+    {
+      "name": "random#298:aes_strength_invalid_9",
+      "exc_type": "KeyError",
+      "stage": "open",
+      "message": "9"
+    }
+  ],
+  "oob": [
+    {
+      "name": "zip64_csize_sentinel_huge",
+      "crossing": [
+        [
+          64,
+          197
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 197
+    },
+    {
+      "name": "zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#16:aes_then_unknown+aes_actual_method_unknown_97+zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#25:zip64_csize_sentinel_tiny+cd_csize_crosses_central_dir+triple_aes",
+      "crossing": [
+        [
+          86,
+          221
+        ]
+      ],
+      "payload_region": [
+        68,
+        115
+      ],
+      "max_end": 221
+    },
+    {
+      "name": "random#30:zip64_usize_sentinel_huge+dup_zip64+zip64_csize_sentinel_huge",
+      "crossing": [
+        [
+          64,
+          197
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 197
+    },
+    {
+      "name": "random#60:dup_aes_first_deflate+cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#77:cd_csize_zero+cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#92:aes_bad_vendor+zip64_placeholder_no_extra+unknown_then_aes",
+      "crossing": [
+        [
+          71,
+          191
+        ]
+      ],
+      "payload_region": [
+        53,
+        100
+      ],
+      "max_end": 191
+    },
+    {
+      "name": "random#108:zip64_placeholder_no_extra+dup_aes_last_deflate",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#111:cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#113:cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#124:cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#130:zip64_usize_sentinel_huge+zip64_csize_sentinel_huge",
+      "crossing": [
+        [
+          64,
+          197
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 197
+    },
+    {
+      "name": "random#135:zip64_declared8_body4+zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#136:cd_csize_crosses_central_dir",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#151:unknown_both_sides+cd_csize_crosses_central_dir+zip64_ln4_missing_q",
+      "crossing": [
+        [
+          64,
+          185
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 185
+    },
+    {
+      "name": "random#153:aes_version_3+cd_csize_crosses_central_dir+aes_version_3",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#165:zip64_placeholder_no_extra+dup_aes_last_deflate",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#184:zip64_ln4_missing_q+zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#187:aes_extra_without_encrypted_flag+unknown_declared_long+zip64_csize_sentinel_huge",
+      "crossing": [
+        [
+          46,
+          197
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 197
+    },
+    {
+      "name": "random#192:aes_strength_invalid_0+zip64_placeholder_no_extra+dup_aes_first_deflate",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#195:dup_aes_divergent_lfh_cd+aes_extra_without_encrypted_flag+zip64_csize_sentinel_huge",
+      "crossing": [
+        [
+          46,
+          197
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 197
+    },
+    {
+      "name": "random#213:zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#218:triple_aes+zip64_placeholder_no_extra",
+      "crossing": [
+        [
+          64,
+          177
+        ]
+      ],
+      "payload_region": [
+        46,
+        93
+      ],
+      "max_end": 177
+    },
+    {
+      "name": "random#240:zip64_len0_with_sentinel+cd_csize_crosses_central_dir+dup_aes_bz2_lzma",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#257:cd_csize_below_aes_overhead+zip64_placeholder_no_extra+unknown_both_sides",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    },
+    {
+      "name": "random#264:zip64_csize_sentinel_huge+cd_usize_truncates_output+zip64_then_aes",
+      "crossing": [
+        [
+          76,
+          201
+        ]
+      ],
+      "payload_region": [
+        58,
+        105
+      ],
+      "max_end": 201
+    },
+    {
+      "name": "random#287:zip64_csize_sentinel_tiny+dup_aes_bz2_lzma",
+      "crossing": [
+        [
+          75,
+          199
+        ]
+      ],
+      "payload_region": [
+        57,
+        104
+      ],
+      "max_end": 199
+    }
+  ]
+}

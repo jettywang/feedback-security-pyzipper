@@ -1,0 +1,79 @@
+Minimal counterexample field layouts
+========================================
+
+### dup_aes_last_deflate
+failure signature: kind=unexpected exc=error stage=read
+minimal mutation chain: ['dup_aes_last_deflate']
+archive bytes: 199
+local file header @0: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=22
+  LFH extra chain (22 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+    +11 id=0x9901 WZ_AES  len=7  body=02004145030800
+payload region: [57, 104) (47 bytes)
+central directory @104: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=22
+  CD extra chain (22 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+    +11 id=0x9901 WZ_AES  len=7  body=02004145030800
+EOCD @177
+
+### aes_strength_invalid_9
+failure signature: kind=unexpected exc=KeyError stage=open
+minimal mutation chain: ['aes_strength_invalid_9']
+archive bytes: 177
+local file header @0: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=11
+  LFH extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145090000
+payload region: [46, 93) (47 bytes)
+central directory @93: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=11
+  CD extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145090000
+EOCD @155
+
+### cd_csize_crosses_central_dir
+failure signature: kind=clean-rejection exc=BadZipFile stage=read
+minimal mutation chain: ['cd_csize_crosses_central_dir']
+archive bytes: 177
+local file header @0: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=11
+  LFH extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+payload region: [46, 93) (47 bytes)
+central directory @93: method=0x0063 flags=0x0001 csize=5000 usize=19 xlen=11
+  CD extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+EOCD @155
+
+### zip64_placeholder_no_extra
+failure signature: kind=unexpected exc=EOFError stage=read
+minimal mutation chain: ['zip64_placeholder_no_extra']
+archive bytes: 177
+local file header @0: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=11
+  LFH extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+payload region: [46, 93) (47 bytes)
+central directory @93: method=0x0063 flags=0x0001 csize=4294967295 usize=4294967295 xlen=11
+  CD extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+EOCD @155
+
+### lfh_xlen_overruns
+failure signature: kind=unexpected exc=error stage=open
+minimal mutation chain: ['lfh_xlen_overruns']
+archive bytes: 177
+local file header @0: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=200
+  LFH extra chain (142 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+    +11 id=0xb411 UNKNOWN len=46021 body=bf0cb115ef4a6a60a9e60d2739cedc59699e9f37b38de8bb78f96ce6ffac522414928a2cc0ab2b5b82f4ed504b01021403140001006300c1aa6c5d000000002f0000001300000005000b000000000000000000800100000000742e7478740199070002004145030000504b050600000000010001003e0000005d0000000000 OVERFLOW
+payload region: declared LFH xlen overruns the header; data_off=235 is past cd_off=93
+central directory @93: method=0x0063 flags=0x0001 csize=47 usize=19 xlen=11
+  CD extra chain (11 bytes):
+    + 0 id=0x9901 WZ_AES  len=7  body=02004145030000
+EOCD @155
+
+Relaxed length-guard evidence
+========================================
+strict parser  -> BadZipFile @init: Corrupt extra field 9901 (size=7)
+relaxed parser -> error @init: unpack requires a buffer of 7 bytes
+
+Conclusion: with the ln+4 guard present the contradiction is a clean BadZipFile;
+with the guard removed the same bytes reach struct.unpack and escape as a raw
+struct.error, so the guard is the defense preventing an unvalidated over-read.

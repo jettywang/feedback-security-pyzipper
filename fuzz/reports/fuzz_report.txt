@@ -1,0 +1,139 @@
+pyzipper AES/ZIP64 structured fuzzing
+seed=1592594996 iterations=300 archive_bytes=177
+
+counts: ok=107 clean_rejections=135 unexpected=93 oob=29
+
+unexpected failures (non-domain exceptions):
+  - dup_aes_last_deflate         error        @read Error -3 while decompressing data: invalid stored block lengths
+  - dup_aes_divergent_lfh_cd     error        @read Error -3 while decompressing data: invalid stored block lengths
+  - zip64_placeholder_no_extra   EOFError     @read 
+  - lfh_xlen_overruns            error        @open unpack requires a buffer of 16 bytes
+  - aes_strength_invalid_9       KeyError     @open 9
+  - aes_strength_invalid_0       KeyError     @open 0
+  - aes_extra_without_encrypted_flag AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#4                     AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#8                     KeyError     @open 9
+  - random#9                     AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#10                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#12                    error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#16                    EOFError     @read 
+  - random#22                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#25                    EOFError     @read 
+  - random#29                    error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#33                    error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#37                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#40                    KeyError     @open 9
+  - random#43                    KeyError     @open 9
+  - random#45                    KeyError     @open 9
+  - random#50                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#63                    error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#65                    error        @open unpack requires a buffer of 16 bytes
+  - random#72                    error        @open unpack requires a buffer of 16 bytes
+  - random#75                    error        @open unpack requires a buffer of 16 bytes
+  - random#78                    error        @open unpack requires a buffer of 16 bytes
+  - random#79                    KeyError     @open 0
+  - random#84                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#86                    KeyError     @open 0
+  - random#87                    KeyError     @open 9
+  - random#88                    error        @open unpack requires a buffer of 16 bytes
+  - random#91                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#92                    EOFError     @read 
+  - random#93                    KeyError     @open 0
+  - random#94                    error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#98                    AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#102                   KeyError     @open 9
+  - random#108                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#112                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#125                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#135                   EOFError     @read 
+  - random#140                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#145                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#148                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#165                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#166                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#169                   KeyError     @open 0
+  - random#171                   KeyError     @open 9
+  - random#173                   KeyError     @open 0
+  - random#175                   error        @read Error -3 while decompressing data: invalid distance too far back
+  - random#182                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#184                   EOFError     @read 
+  - random#187                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#190                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#192                   EOFError     @read 
+  - random#194                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#195                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#200                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#202                   KeyError     @open 0
+  - random#210                   KeyError     @open 0
+  - random#212                   KeyError     @open 9
+  - random#213                   EOFError     @read 
+  - random#215                   error        @open unpack requires a buffer of 16 bytes
+  - random#218                   EOFError     @read 
+  - random#221                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#223                   KeyError     @open 9
+  - random#231                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#232                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#234                   KeyError     @open 0
+  - random#235                   KeyError     @open 9
+  - random#237                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#239                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#240                   EOFError     @read 
+  - random#241                   KeyError     @open 0
+  - random#242                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#243                   KeyError     @open 9
+  - random#246                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#249                   KeyError     @open 9
+  - random#257                   EOFError     @read 
+  - random#259                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#262                   KeyError     @open 9
+  - random#263                   AttributeError @read 'NoneType' object has no attribute 'hmac_size'
+  - random#265                   error        @open unpack requires a buffer of 16 bytes
+  - random#268                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#282                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#283                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#284                   error        @read Error -3 while decompressing data: invalid stored block lengths
+  - random#286                   KeyError     @open 9
+  - random#287                   EOFError     @read 
+  - random#289                   IndexError   @open index out of range
+  - random#290                   KeyError     @open 9
+  - random#298                   KeyError     @open 9
+
+out-of-bounds data reads (crossed entry payload boundary):
+  - zip64_csize_sentinel_huge    read_end=197 payload_end=93 ranges=[(64, 197)]
+  - zip64_placeholder_no_extra   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - cd_csize_crosses_central_dir read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#16                    read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#25                    read_end=221 payload_end=115 ranges=[(86, 221)]
+  - random#30                    read_end=197 payload_end=93 ranges=[(64, 197)]
+  - random#60                    read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#77                    read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#92                    read_end=191 payload_end=100 ranges=[(71, 191)]
+  - random#108                   read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#111                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#113                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#124                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#130                   read_end=197 payload_end=93 ranges=[(64, 197)]
+  - random#135                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#136                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#151                   read_end=185 payload_end=93 ranges=[(64, 185)]
+  - random#153                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#165                   read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#184                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#187                   read_end=197 payload_end=93 ranges=[(46, 197)]
+  - random#192                   read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#195                   read_end=197 payload_end=93 ranges=[(46, 197)]
+  - random#213                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#218                   read_end=177 payload_end=93 ranges=[(64, 177)]
+  - random#240                   read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#257                   read_end=199 payload_end=104 ranges=[(75, 199)]
+  - random#264                   read_end=201 payload_end=105 ranges=[(76, 201)]
+  - random#287                   read_end=199 payload_end=104 ranges=[(75, 199)]
+
+benign order/unknown-field mutations accepted:
+  - aes_then_unknown -> accepted
+  - unknown_then_aes -> accepted
+  - unknown_both_sides -> accepted
+  - zip64_then_aes -> accepted
+  - aes_then_zip64 -> accepted
+
+wrote fuzz/reports/fuzz_report.json
