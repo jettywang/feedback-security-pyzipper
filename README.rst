@@ -101,6 +101,32 @@ Documentation
 
 Official Python ZipFile documentation is available here: https://docs.python.org/3/library/zipfile.html
 
+Member Span Audit
+-----------------
+
+A crafted archive can declare two members that reuse the same encrypted
+bytes while appearing as two independent files. pyzipper can precheck the
+byte range of every member — local header, name/extra, encryption header,
+compressed payload, authentication trailer and data descriptor — without
+decompressing anything:
+
+.. code-block:: python
+
+   import pyzipper
+
+   with pyzipper.AESZipFile('suspect.zip') as zf:
+       audit = zf.audit_member_spans()
+       if not audit.ok:
+           print(audit.problem_summary())
+       # or raise BadZipFile on any overlap / unconfirmable extent:
+       zf.check_member_spans(strict=True)
+
+Pass ``strict_member_spans=True`` to the constructor to reject overlapping
+or unconfirmable members when they are opened. Members whose declared
+lengths cannot be confirmed (negative or out-of-bounds ranges) are
+reported as indeterminate instead of being clamped into seemingly valid
+ranges.
+
 Credits
 -------
 

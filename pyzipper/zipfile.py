@@ -36,7 +36,8 @@ except ImportError:
 
 __all__ = ["BadZipFile", "BadZipfile", "error",
            "ZIP_STORED", "ZIP_DEFLATED", "ZIP_BZIP2", "ZIP_LZMA",
-           "is_zipfile", "ZipInfo", "ZipFile", "PyZipFile", "LargeZipFile"]
+           "is_zipfile", "ZipInfo", "ZipFile", "PyZipFile", "LargeZipFile",
+           "ZipMemberSpan", "ZipMemberConflict", "ZipSpanAudit"]
 
 
 class BadZipFile(Exception):
@@ -1138,6 +1139,157 @@ class _Tellable:
         self.fp.close()
 
 
+# WinZip AES framing sizes, mirrored from zipfile_aes to avoid a circular
+# import. Keep in sync with zipfile_aes.WZ_SALT_LENGTHS and
+# zipfile_aes.AESZipDecrypter.hmac_size.
+_WZ_AES_SALT_LENGTHS = {1: 8, 2: 12, 3: 16}
+_WZ_AES_PWD_VERIFY_LENGTH = 2
+_WZ_AES_AUTH_TRAILER_LENGTH = 10
+
+_DD_SIGNATURE_BYTES = struct.pack('<L', _DD_SIGNATURE)
+
+
+class ZipMemberSpan:
+    """Byte-range layout of a single archive member.
+
+    Each segment is a ``(start, end)`` pair of absolute file offsets (end
+    exclusive), or None when the member has no such segment:
+
+        header              fixed-size local file header
+        name_extra          local file name and extra field
+        encryption_header   encryption header (salt / key material)
+        payload             compressed (and encrypted) file data
+        auth_trailer        authentication trailer (WinZip AES HMAC)
+        descriptor          data descriptor (flag bit 3)
+
+    ``error`` is None when every boundary could be confirmed from the
+    local header and the central directory. Otherwise it describes why the
+    member extent is indeterminate; indeterminate spans are never clamped
+    into seemingly valid ranges.
+    """
+
+    __slots__ = ('zinfo', 'header', 'name_extra', 'encryption_header',
+                 'payload', 'auth_trailer', 'descriptor', 'end', 'error')
+
+    _SEGMENT_NAMES = ('header', 'name_extra', 'encryption_header',
+                      'payload', 'auth_trailer', 'descriptor')
+
+    def __init__(self, zinfo):
+        self.zinfo = zinfo
+        self.header = None
+        self.name_extra = None
+        self.encryption_header = None
+        self.payload = None
+        self.auth_trailer = None
+        self.descriptor = None
+        self.end = None
+        self.error = None
+
+    @property
+    def start(self):
+        return self.zinfo.header_offset
+
+    @property
+    def complete(self):
+        return self.error is None
+
+    def segment_at(self, offset):
+        """Return the name of the segment containing ``offset``, or None."""
+        for name in self._SEGMENT_NAMES:
+            segment = getattr(self, name)
+            if segment is not None and segment[0] <= offset < segment[1]:
+                return name
+        return None
+
+    def __repr__(self):
+        return '<%s filename=%r range=%r error=%r>' % (
+            self.__class__.__name__, self.zinfo.filename,
+            (self.start, self.end), self.error)
+
+
+class ZipMemberConflict:
+    """An overlap between the byte ranges of two archive members."""
+
+    __slots__ = ('members', 'start', 'end', 'kind')
+
+    def __init__(self, members, start, end, kind):
+        self.members = members
+        self.start = start
+        self.end = end
+        self.kind = kind
+
+    def __repr__(self):
+        return '<%s members=%r range=(%d, %d) kind=%r>' % (
+            self.__class__.__name__,
+            tuple(m.filename for m in self.members),
+            self.start, self.end, self.kind)
+
+
+class ZipSpanAudit:
+    """Result of a whole-archive member span precheck."""
+
+    __slots__ = ('spans', 'conflicts')
+
+    def __init__(self, spans, conflicts):
+        self.spans = spans
+        self.conflicts = conflicts
+
+    @property
+    def indeterminate(self):
+        """Members whose byte extent could not be confirmed."""
+        return [span for span in self.spans if not span.complete]
+
+    @property
+    def ok(self):
+        return not self.conflicts and not self.indeterminate
+
+    def problem_summary(self):
+        problems = []
+        for conflict in self.conflicts:
+            problems.append(
+                "members %r and %r overlap at bytes [%d, %d) (%s)" % (
+                    conflict.members[0].filename,
+                    conflict.members[1].filename,
+                    conflict.start, conflict.end, conflict.kind))
+        for span in self.indeterminate:
+            problems.append(
+                "member %r has an unconfirmable byte extent: %s" % (
+                    span.zinfo.filename, span.error))
+        return '; '.join(problems)
+
+
+def _find_span_conflicts(spans):
+    """Pair up members whose confirmed byte extents intersect."""
+    conflicts = []
+    complete = sorted(
+        (span for span in spans if span.complete),
+        key=lambda span: span.start)
+    for i, first in enumerate(complete):
+        for second in complete[i + 1:]:
+            if second.start >= first.end:
+                break
+            start = max(first.start, second.start)
+            end = min(first.end, second.end)
+            kind = '%s-overlaps-%s' % (
+                first.segment_at(start) or 'extent',
+                second.segment_at(start) or 'extent')
+            conflicts.append(ZipMemberConflict(
+                (first.zinfo, second.zinfo), start, end, kind))
+    # A member whose extent is indeterminate may still point into the
+    # confirmed extent of another member.
+    for span in spans:
+        if span.complete:
+            continue
+        for other in complete:
+            if other.start <= span.start < other.end:
+                kind = '%s-overlaps-indeterminate' % (
+                    other.segment_at(span.start) or 'extent',)
+                conflicts.append(ZipMemberConflict(
+                    (other.zinfo, span.zinfo), span.start,
+                    min(other.end, span.start + sizeFileHeader), kind))
+    return conflicts
+
+
 class ZipExtFile(io.BufferedIOBase):
     """File-like object for reading an archive member.
 
@@ -1691,7 +1843,8 @@ class ZipFile:
     zipwritefile_cls = _ZipWriteFile
 
     def __init__(self, file, mode="r", compression=ZIP_STORED, allowZip64=True,
-                 compresslevel=None, *, strict_timestamps=True):
+                 compresslevel=None, *, strict_timestamps=True,
+                 strict_member_spans=False):
         """Open the ZIP file with mode read 'r', write 'w', exclusive create
         'x', or append 'a'."""
         if mode not in ('r', 'w', 'x', 'a'):
@@ -1712,6 +1865,9 @@ class ZipFile:
         self.encryption_kwargs = None
         self._comment = b''
         self._strict_timestamps = strict_timestamps
+        # When True, opening a member whose byte range overlaps another
+        # member, or whose extent cannot be confirmed, raises BadZipFile.
+        self.strict_member_spans = strict_member_spans
 
         # Check if we were passed a file-like object
         # os.PathLike and os.fspath were added in python 3.6
@@ -2015,6 +2171,8 @@ class ZipFile:
         return self._open_to_read(mode, zinfo, pwd)
 
     def _open_to_read(self, mode, zinfo, pwd):
+        if self.strict_member_spans:
+            self.check_member(zinfo)
         # Open for reading:
         self._fileRefCnt += 1
         zef_file = _SharedFile(self.fp, zinfo.header_offset,
@@ -2068,6 +2226,153 @@ class ZipFile:
 
         self._writecheck(zinfo)
         return self.zipwritefile_cls(self, zinfo, zip64, encrypter)
+
+    def _member_span(self, zinfo, filesize):
+        """Compute the byte-range layout of a single archive member.
+
+        Only the local header and (if present) the data descriptor
+        signature are read; payload data is never decompressed. Any
+        boundary that cannot be confirmed marks the span indeterminate
+        instead of being clamped into a seemingly valid range.
+        """
+        span = ZipMemberSpan(zinfo)
+        start = zinfo.header_offset
+        if start < 0 or start + sizeFileHeader > filesize:
+            span.error = (
+                'local header offset %d is out of bounds' % start)
+            return span
+        self.fp.seek(start)
+        fheader = self.fp.read(sizeFileHeader)
+        if len(fheader) != sizeFileHeader or \
+                fheader[:4] != stringFileHeader:
+            span.error = 'bad magic number for local file header'
+            return span
+        fheader = struct.unpack(structFileHeader, fheader)
+        name_end = (start + sizeFileHeader
+                    + fheader[_FH_FILENAME_LENGTH]
+                    + fheader[_FH_EXTRA_FIELD_LENGTH])
+        if name_end > filesize:
+            span.error = 'local file name/extra extends past end of file'
+            return span
+        span.header = (start, start + sizeFileHeader)
+        span.name_extra = (start + sizeFileHeader, name_end)
+
+        encryption_header_length = 0
+        auth_trailer_length = 0
+        if zinfo.is_encrypted:
+            if getattr(zinfo, 'wz_aes_version', None) is not None:
+                salt_length = _WZ_AES_SALT_LENGTHS.get(
+                    getattr(zinfo, 'wz_aes_strength', None))
+                if salt_length is None:
+                    span.error = 'unknown WinZip AES key strength'
+                    return span
+                encryption_header_length = (
+                    salt_length + _WZ_AES_PWD_VERIFY_LENGTH)
+                auth_trailer_length = _WZ_AES_AUTH_TRAILER_LENGTH
+            else:
+                encryption_header_length = \
+                    CRCZipDecrypter.encryption_header_length
+
+        payload_length = (zinfo.compress_size
+                          - encryption_header_length
+                          - auth_trailer_length)
+        if payload_length < 0:
+            span.error = (
+                'declared compressed size %d is smaller than the '
+                'encryption framing (%d bytes)' % (
+                    zinfo.compress_size,
+                    encryption_header_length + auth_trailer_length))
+            return span
+        data_end = name_end + zinfo.compress_size
+        if data_end > filesize:
+            span.error = (
+                'member data extends past end of file '
+                '(%d > %d)' % (data_end, filesize))
+            return span
+        if encryption_header_length:
+            span.encryption_header = (
+                name_end, name_end + encryption_header_length)
+        span.payload = (name_end + encryption_header_length,
+                        name_end + encryption_header_length + payload_length)
+        if auth_trailer_length:
+            span.auth_trailer = (data_end - auth_trailer_length, data_end)
+
+        end = data_end
+        if zinfo.use_datadescripter:
+            zip64 = (zinfo.file_size > ZIP64_LIMIT
+                     or zinfo.compress_size > ZIP64_LIMIT)
+            self.fp.seek(data_end)
+            signature = self.fp.read(4)
+            if len(signature) != 4:
+                span.error = 'cannot read data descriptor'
+                return span
+            if signature == _DD_SIGNATURE_BYTES:
+                descriptor_length = 24 if zip64 else 16
+            else:
+                descriptor_length = 20 if zip64 else 12
+            end = data_end + descriptor_length
+            if end > filesize:
+                span.error = 'data descriptor extends past end of file'
+                return span
+            span.descriptor = (data_end, end)
+        span.end = end
+        return span
+
+    def audit_member_spans(self):
+        """Precheck the byte ranges of all members without decompressing.
+
+        Returns a ZipSpanAudit describing each member's layout, any
+        overlapping members, and any members whose extent could not be
+        confirmed from the local header and central directory.
+        """
+        if self.fp is None:
+            raise ValueError(
+                "Attempt to use ZIP archive that was already closed")
+        if not self._seekable:
+            raise ValueError(
+                "Member span audit requires a seekable file")
+        with self._lock:
+            self.fp.seek(0, 2)
+            filesize = self.fp.tell()
+            spans = [self._member_span(zinfo, filesize)
+                     for zinfo in self.filelist]
+        return ZipSpanAudit(spans, _find_span_conflicts(spans))
+
+    def check_member_spans(self, strict=False):
+        """Audit all member byte ranges.
+
+        With strict=True, raise BadZipFile if any members overlap or any
+        member extent cannot be confirmed. Returns the ZipSpanAudit.
+        """
+        audit = self.audit_member_spans()
+        if strict and not audit.ok:
+            raise BadZipFile(
+                "ZIP member span check failed: " + audit.problem_summary())
+        return audit
+
+    def check_member(self, zinfo):
+        """Raise BadZipFile if a single member's byte range is unsafe.
+
+        The member is checked against the same whole-archive audit used
+        by check_member_spans(), so per-member and whole-archive
+        conclusions agree.
+        """
+        audit = self.audit_member_spans()
+        for span in audit.spans:
+            if span.zinfo is zinfo and not span.complete:
+                raise BadZipFile(
+                    "Member %r has an unconfirmable byte extent: %s" % (
+                        zinfo.filename, span.error))
+        for conflict in audit.conflicts:
+            if any(member is zinfo for member in conflict.members):
+                raise BadZipFile(
+                    "Member %r overlaps %r at bytes [%d, %d) (%s)" % (
+                        zinfo.filename,
+                        conflict.members[1].filename
+                        if conflict.members[0] is zinfo
+                        else conflict.members[0].filename,
+                        conflict.start, conflict.end, conflict.kind))
+        return audit
 
     def extract(self, member, path=None, pwd=None):
         """Extract a member from the archive to the current working directory,

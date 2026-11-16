@@ -2,6 +2,15 @@
 History
 =======
 
+Unreleased
+----------
+* Add member span auditing: ``ZipFile.audit_member_spans()`` computes each
+  member's byte ranges (local header, name/extra, encryption header,
+  compressed payload, authentication trailer, data descriptor) without
+  decompressing, and reports members that share bytes or whose extent
+  cannot be confirmed. ``ZipFile.check_member_spans(strict=True)`` and the
+  ``strict_member_spans`` constructor keyword reject such archives.
+
 0.4.0 (2026-05-13)
 ------------------
 * Update package to use pyproject.toml
